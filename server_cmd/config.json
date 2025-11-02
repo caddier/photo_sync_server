@@ -1,0 +1,4 @@
+{
+    "server_name": "photo_sync_server1",
+    "receive_dir" : "photos"
+}
