@@ -6,12 +6,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"image"
 	"image/jpeg"
 	"image/png"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/mux"
 	"golang.org/x/image/draw"
 )
 
@@ -52,6 +55,7 @@ const (
 type Config struct {
 	ServerName string `json:"server_name"`
 	ReceiveDir string `json:"receive_dir"`
+	HttpPort   string `json:"http_port"`
 }
 
 func loadConfig() (*Config, error) {
@@ -403,6 +407,227 @@ func startUDPServer(config *Config) error {
 			log.Printf("Error sending UDP response: %v\n", err)
 		}
 	}
+}
+
+// startHTTPServer starts an HTTP server with Gorilla Mux for browsing thumbnails via web browser
+func startHTTPServer(config *Config) error {
+	router := mux.NewRouter()
+
+	// Home page - list all phone directories
+	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		baseDir := config.ReceiveDir
+		if baseDir == "" {
+			baseDir = "received"
+		}
+
+		entries, err := os.ReadDir(baseDir)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error reading directory: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		var phoneDirs []string
+		for _, e := range entries {
+			if e.IsDir() {
+				phoneDirs = append(phoneDirs, e.Name())
+			}
+		}
+		sort.Strings(phoneDirs)
+
+		tmpl := `<!DOCTYPE html>
+<html>
+<head>
+    <title>Photo Sync Server - Phone Directories</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        h1 { color: #333; }
+        .phone-list { list-style: none; padding: 0; }
+        .phone-list li { margin: 10px 0; }
+        .phone-list a { 
+            display: block; 
+            padding: 15px; 
+            background: white; 
+            text-decoration: none; 
+            color: #333; 
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        .phone-list a:hover { transform: translateX(5px); background: #e3f2fd; }
+    </style>
+</head>
+<body>
+    <h1>Photo Sync Server - Phone Directories</h1>
+    {{if .PhoneDirs}}
+    <ul class="phone-list">
+        {{range .PhoneDirs}}
+        <li><a href="/phone/{{.}}">📱 {{.}}</a></li>
+        {{end}}
+    </ul>
+    {{else}}
+    <p>No phone directories found.</p>
+    {{end}}
+</body>
+</html>`
+
+		t := template.Must(template.New("home").Parse(tmpl))
+		data := struct {
+			PhoneDirs []string
+		}{PhoneDirs: phoneDirs}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		t.Execute(w, data)
+	}).Methods("GET")
+
+	// Phone directory - show thumbnails
+	router.HandleFunc("/phone/{phoneName}", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		phoneName := vars["phoneName"]
+
+		baseDir := config.ReceiveDir
+		if baseDir == "" {
+			baseDir = "received"
+		}
+
+		phoneDir := filepath.Join(baseDir, phoneName)
+		thumbDir := filepath.Join(phoneDir, "subnails")
+
+		entries, err := os.ReadDir(thumbDir)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error reading thumbnails: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		var thumbFiles []string
+		for _, e := range entries {
+			if !e.IsDir() {
+				ext := strings.ToLower(filepath.Ext(e.Name()))
+				if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
+					thumbFiles = append(thumbFiles, e.Name())
+				}
+			}
+		}
+		sort.Strings(thumbFiles)
+
+		tmpl := `<!DOCTYPE html>
+<html>
+<head>
+    <title>{{.PhoneName}} - Thumbnails</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        h1 { color: #333; }
+        .back-link { 
+            display: inline-block; 
+            margin-bottom: 20px; 
+            padding: 10px 20px; 
+            background: #2196F3; 
+            color: white; 
+            text-decoration: none; 
+            border-radius: 5px;
+        }
+        .back-link:hover { background: #1976D2; }
+        .gallery { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); 
+            gap: 15px; 
+            padding: 10px;
+        }
+        .gallery-item { 
+            background: white; 
+            padding: 10px; 
+            border-radius: 5px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .gallery-item img { 
+            width: 180px;
+            height: 180px;
+            object-fit: cover;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .gallery-item img:hover { opacity: 0.8; }
+        .filename { 
+            margin-top: 8px; 
+            font-size: 12px; 
+            color: #666; 
+            word-break: break-all;
+        }
+        .count { color: #666; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-link">← Back to Phone List</a>
+    <h1>📱 {{.PhoneName}}</h1>
+    <p class="count">Total thumbnails: {{len .Thumbs}}</p>
+    {{if .Thumbs}}
+    <div class="gallery">
+        {{range .Thumbs}}
+        <div class="gallery-item">
+            <a href="/thumb/{{$.PhoneName}}/{{.}}" target="_blank">
+                <img src="/thumb/{{$.PhoneName}}/{{.}}" alt="{{.}}" />
+            </a>
+            <div class="filename">{{.}}</div>
+        </div>
+        {{end}}
+    </div>
+    {{else}}
+    <p>No thumbnails found.</p>
+    {{end}}
+</body>
+</html>`
+
+		t := template.Must(template.New("phone").Parse(tmpl))
+		data := struct {
+			PhoneName string
+			Thumbs    []string
+		}{
+			PhoneName: phoneName,
+			Thumbs:    thumbFiles,
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		t.Execute(w, data)
+	}).Methods("GET")
+
+	// Serve thumbnail images
+	router.HandleFunc("/thumb/{phoneName}/{fileName}", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		phoneName := vars["phoneName"]
+		fileName := vars["fileName"]
+
+		// Security: prevent path traversal
+		if strings.Contains(phoneName, "..") || strings.Contains(fileName, "..") {
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
+
+		baseDir := config.ReceiveDir
+		if baseDir == "" {
+			baseDir = "received"
+		}
+
+		filePath := filepath.Join(baseDir, phoneName, "subnails", fileName)
+
+		// Check if file exists
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+
+		http.ServeFile(w, r, filePath)
+	}).Methods("GET")
+
+	port := config.HttpPort
+	if port == "" {
+		port = ":8080"
+	}
+	if !strings.HasPrefix(port, ":") {
+		port = ":" + port
+	}
+
+	log.Printf("HTTP Server listening on port %s\n", port)
+	return http.ListenAndServe(port, router)
 }
 
 // generateThumbnails scans the phone directory and writes thumbnails into a subdirectory named "subnails".
@@ -758,7 +983,7 @@ func main() {
 	log.Printf("Server Name: %s\n", config.ServerName)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 
 	// Start TCP server
 	go func() {
@@ -773,6 +998,14 @@ func main() {
 		defer wg.Done()
 		if err := startUDPServer(config); err != nil {
 			log.Printf("UDP Server error: %v\n", err)
+		}
+	}()
+
+	// Start HTTP server
+	go func() {
+		defer wg.Done()
+		if err := startHTTPServer(config); err != nil {
+			log.Printf("HTTP Server error: %v\n", err)
 		}
 	}()
 
