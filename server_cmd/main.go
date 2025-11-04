@@ -563,10 +563,10 @@ func startHTTPServer(config *Config) error {
     {{if .Thumbs}}
     <div class="gallery">
         {{range .Thumbs}}
-        <div class="gallery-item">
-            <a href="/thumb/{{$.PhoneName}}/{{.}}" target="_blank">
-                <img src="/thumb/{{$.PhoneName}}/{{.}}" alt="{{.}}" />
-            </a>
+		<div class="gallery-item">
+			<a href="/orig/{{$.PhoneName}}/{{.}}" target="_blank">
+				<img src="/thumb/{{$.PhoneName}}/{{.}}" alt="{{.}}" />
+			</a>
             <div class="filename">{{.}}</div>
         </div>
         {{end}}
@@ -616,6 +616,66 @@ func startHTTPServer(config *Config) error {
 		}
 
 		http.ServeFile(w, r, filePath)
+	}).Methods("GET")
+
+	// Serve original media corresponding to a thumbnail name
+	router.HandleFunc("/orig/{phoneName}/{thumbName}", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		phoneName := vars["phoneName"]
+		thumbName := vars["thumbName"]
+
+		// Security: prevent path traversal
+		if strings.Contains(phoneName, "..") || strings.Contains(thumbName, "..") {
+			http.Error(w, "Invalid path", http.StatusBadRequest)
+			return
+		}
+
+		baseDir := config.ReceiveDir
+		if baseDir == "" {
+			baseDir = "received"
+		}
+
+		// Derive base name from thumbnail: remove extension and optional tbn- prefix
+		thumbExt := strings.ToLower(filepath.Ext(thumbName))
+		base := strings.TrimSuffix(thumbName, thumbExt)
+		if strings.HasPrefix(strings.ToLower(base), "tbn-") {
+			base = base[4:]
+		}
+
+		// Try to find original file in the phone directory
+		phoneDir := filepath.Join(baseDir, phoneName)
+
+		// Candidate lists
+		imageExts := []string{thumbExt}
+		// normalize and expand common image extensions in case thumbnail ext differs
+		if thumbExt == ".jpeg" {
+			imageExts = append(imageExts, ".jpg")
+		} else if thumbExt == ".jpg" {
+			imageExts = append(imageExts, ".jpeg")
+		}
+		imageExts = append(imageExts, ".png")
+
+		videoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+
+		// First try images
+		for _, ext := range imageExts {
+			orig := filepath.Join(phoneDir, base+ext)
+			if _, err := os.Stat(orig); err == nil {
+				http.ServeFile(w, r, orig)
+				return
+			}
+		}
+
+		// Then try videos (common formats)
+		for _, ext := range videoExts {
+			orig := filepath.Join(phoneDir, base+ext)
+			if _, err := os.Stat(orig); err == nil {
+				http.ServeFile(w, r, orig)
+				return
+			}
+		}
+
+		http.NotFound(w, r)
 	}).Methods("GET")
 
 	port := config.HttpPort
