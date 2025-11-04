@@ -163,9 +163,11 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 
 		if msgType == msgTypeSyncComplete {
 			log.Printf("Received sync complete message type, generating thumbnails under %s\n", recvDir)
-			if err := generateThumbnails(recvDir); err != nil {
-				log.Printf("Thumbnail generation error: %v\n", err)
-			}
+			go func() {
+				if err := generateThumbnails(recvDir); err != nil {
+					log.Printf("Thumbnail generation error: %v\n", err)
+				}
+			}()
 			return
 		}
 
