@@ -481,10 +481,21 @@ func startHTTPServer(config *Config) error {
 		t.Execute(w, data)
 	}).Methods("GET")
 
-	// Phone directory - show thumbnails
+	// Phone directory - show thumbnails with pagination
 	router.HandleFunc("/phone/{phoneName}", func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
 		phoneName := vars["phoneName"]
+
+		// Parse page parameter (default to 1)
+		pageStr := r.URL.Query().Get("page")
+		page := 1
+		if pageStr != "" {
+			if p, err := fmt.Sscanf(pageStr, "%d", &page); err == nil && p == 1 && page > 0 {
+				// page is valid
+			} else {
+				page = 1
+			}
+		}
 
 		baseDir := config.ReceiveDir
 		if baseDir == "" {
@@ -511,6 +522,28 @@ func startHTTPServer(config *Config) error {
 		}
 		sort.Strings(thumbFiles)
 
+		// Pagination logic
+		const itemsPerPage = 24
+		totalItems := len(thumbFiles)
+		totalPages := (totalItems + itemsPerPage - 1) / itemsPerPage
+		if totalPages < 1 {
+			totalPages = 1
+		}
+		if page > totalPages {
+			page = totalPages
+		}
+
+		start := (page - 1) * itemsPerPage
+		end := start + itemsPerPage
+		if end > totalItems {
+			end = totalItems
+		}
+
+		var pagedThumbs []string
+		if start < totalItems {
+			pagedThumbs = thumbFiles[start:end]
+		}
+
 		tmpl := `<!DOCTYPE html>
 <html>
 <head>
@@ -528,6 +561,38 @@ func startHTTPServer(config *Config) error {
             border-radius: 5px;
         }
         .back-link:hover { background: #1976D2; }
+        .info-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .count { color: #666; margin: 0; }
+        .pagination {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+        .pagination a, .pagination span {
+            padding: 8px 12px;
+            border-radius: 3px;
+            text-decoration: none;
+            background: white;
+            color: #333;
+            border: 1px solid #ddd;
+        }
+        .pagination a:hover { background: #e3f2fd; }
+        .pagination .current {
+            background: #2196F3;
+            color: white;
+            border-color: #2196F3;
+        }
+        .pagination .disabled {
+            color: #ccc;
+            cursor: not-allowed;
+        }
         .gallery { 
             display: grid; 
             grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); 
@@ -555,13 +620,39 @@ func startHTTPServer(config *Config) error {
             color: #666; 
             word-break: break-all;
         }
-        .count { color: #666; margin-bottom: 15px; }
     </style>
 </head>
 <body>
     <a href="/" class="back-link">← Back to Phone List</a>
     <h1>📱 {{.PhoneName}}</h1>
-    <p class="count">Total thumbnails: {{len .Thumbs}}</p>
+    <div class="info-bar">
+        <p class="count">Total: {{.TotalItems}} | Page {{.CurrentPage}} of {{.TotalPages}}</p>
+        <div class="pagination">
+            {{if gt .CurrentPage 1}}
+                <a href="?page=1">« First</a>
+                <a href="?page={{.PrevPage}}">‹ Prev</a>
+            {{else}}
+                <span class="disabled">« First</span>
+                <span class="disabled">‹ Prev</span>
+            {{end}}
+            
+            {{range .PageNumbers}}
+                {{if eq . $.CurrentPage}}
+                    <span class="current">{{.}}</span>
+                {{else}}
+                    <a href="?page={{.}}">{{.}}</a>
+                {{end}}
+            {{end}}
+            
+            {{if lt .CurrentPage .TotalPages}}
+                <a href="?page={{.NextPage}}">Next ›</a>
+                <a href="?page={{.TotalPages}}">Last »</a>
+            {{else}}
+                <span class="disabled">Next ›</span>
+                <span class="disabled">Last »</span>
+            {{end}}
+        </div>
+    </div>
     {{if .Thumbs}}
     <div class="gallery">
         {{range .Thumbs}}
@@ -579,13 +670,44 @@ func startHTTPServer(config *Config) error {
 </body>
 </html>`
 
+		// Generate page numbers for pagination (show max 7 page links)
+		var pageNumbers []int
+		maxLinks := 7
+		startPage := page - maxLinks/2
+		if startPage < 1 {
+			startPage = 1
+		}
+		endPage := startPage + maxLinks - 1
+		if endPage > totalPages {
+			endPage = totalPages
+			startPage = endPage - maxLinks + 1
+			if startPage < 1 {
+				startPage = 1
+			}
+		}
+		for i := startPage; i <= endPage; i++ {
+			pageNumbers = append(pageNumbers, i)
+		}
+
 		t := template.Must(template.New("phone").Parse(tmpl))
 		data := struct {
-			PhoneName string
-			Thumbs    []string
+			PhoneName   string
+			Thumbs      []string
+			TotalItems  int
+			TotalPages  int
+			CurrentPage int
+			PrevPage    int
+			NextPage    int
+			PageNumbers []int
 		}{
-			PhoneName: phoneName,
-			Thumbs:    thumbFiles,
+			PhoneName:   phoneName,
+			Thumbs:      pagedThumbs,
+			TotalItems:  totalItems,
+			TotalPages:  totalPages,
+			CurrentPage: page,
+			PrevPage:    page - 1,
+			NextPage:    page + 1,
+			PageNumbers: pageNumbers,
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
