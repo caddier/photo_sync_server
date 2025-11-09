@@ -209,7 +209,7 @@ func startHTTPServer(config *Config) error {
 		}
 
 		phoneDir := filepath.Join(baseDir, phoneName)
-		thumbDir := filepath.Join(phoneDir, "subnails")
+		thumbDir := filepath.Join(phoneDir, "thumbnails")
 
 		entries, err := os.ReadDir(thumbDir)
 		if err != nil {
@@ -896,7 +896,7 @@ func startHTTPServer(config *Config) error {
 			baseDir = "received"
 		}
 
-		filePath := filepath.Join(baseDir, phoneName, "subnails", fileName)
+		filePath := filepath.Join(baseDir, phoneName, "thumbnails", fileName)
 
 		// Check if file exists
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -943,23 +943,15 @@ func startHTTPServer(config *Config) error {
 			base = base[4:]
 		}
 
-		// Check if base contains subdirectory information (from iOS nested structure)
-		// Try to find the original file in nested directories
-		imageExts := []string{thumbExt}
-		// normalize and expand common image extensions in case thumbnail ext differs
-		if thumbExt == ".jpeg" {
-			imageExts = append(imageExts, ".jpg")
-		} else if thumbExt == ".jpg" {
-			imageExts = append(imageExts, ".jpeg")
-		}
-		imageExts = append(imageExts, ".png")
-
+		// Try all possible image and video extensions since thumbnail extension
+		// may differ from original (e.g., HEIC originals have JPG thumbnails)
+		imageExts := []string{".jpg", ".jpeg", ".png", ".heic"}
 		videoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
 
 		// First try images
 		for _, ext := range imageExts {
-			// Try with nested path structure (iOS might use subdirectories)
 			orig := filepath.Join(phoneDir, base+ext)
+			log.Printf("Checking for original image: %s", orig)
 			if _, err := os.Stat(orig); err == nil {
 				http.ServeFile(w, r, orig)
 				return
@@ -969,6 +961,7 @@ func startHTTPServer(config *Config) error {
 		// Then try videos (common formats)
 		for _, ext := range videoExts {
 			orig := filepath.Join(phoneDir, base+ext)
+			log.Printf("Checking for original video: %s", orig)
 			if _, err := os.Stat(orig); err == nil {
 				http.ServeFile(w, r, orig)
 				return

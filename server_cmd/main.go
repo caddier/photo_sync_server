@@ -33,22 +33,37 @@ const (
 // protocol format : type(1 byte) + length(4 bytes big-endian) + payload (JSON or raw string)
 // Protocol message types
 const (
-	msgTypeData              byte = 1  // file payload (JSON with id/data/media)
-	msgTypeDataAlt           byte = 2  // alternate payload type (handled same as type 1)
-	msgTypeSyncComplete      byte = 3  // client indicates sync complete
-	msgTypeSetPhoneName      byte = 4  // payload is phone/subdirectory name (raw string)
-	msgTypeGetMediaCount     byte = 5  // get total media count request
-	msgTypeMediaCountRsp     byte = 6  // response with total media count
-	msgTypeMediaThumbList    byte = 7  // request for media thumbnail list (page index and page size in data)
-	msgTypeMediaThumbData    byte = 8  // response with media thumbnail data
-	msgTypeMediaDelList      byte = 9  // request for media deletion list
-	msgTypeMediaDelAck       byte = 10 // acknowledgment for media deletion request
-	msgTypeMediaDownloadList byte = 11 // request for media download
-	msgTypeMediaDownloadAck  byte = 12 // acknowledgment for media download request
+	msgTypeImageData            byte = 1  // image file payload (JSON with id/data/media)
+	msgTypeVideoData            byte = 2  // video file payload (JSON with id/data/media)
+	msgTypeSyncComplete         byte = 3  // client indicates sync complete
+	msgTypeSetPhoneName         byte = 4  // payload is phone/subdirectory name (raw string)
+	msgTypeGetMediaCount        byte = 5  // get total media count request
+	msgTypeMediaCountRsp        byte = 6  // response with total media count
+	msgTypeMediaThumbList       byte = 7  // request for media thumbnail list (page index and page size in data)
+	msgTypeMediaThumbData       byte = 8  // response with media thumbnail data
+	msgTypeMediaDelList         byte = 9  // request for media deletion list
+	msgTypeMediaDelAck          byte = 10 // acknowledgment for media deletion request
+	msgTypeMediaDownloadList    byte = 11 // request for media download
+	msgTypeMediaDownloadAck     byte = 12 // acknowledgment for media download request
+	msgTypeChunkedVideoStart    byte = 13 // chunked video start - initiates chunked video transfer
+	msgTypeChunkedVideoData     byte = 14 // chunked video data - one chunk of video data
+	msgTypeChunkedVideoComplete byte = 15 // chunked video complete - all chunks sent
 
 	// Server ACK type (matches client type for simplicity)
 	msgTypeAck byte = msgTypeSyncComplete
 )
+
+// ChunkedVideoInfo tracks ongoing chunked video transfers
+type ChunkedVideoInfo struct {
+	ID             string
+	TotalSize      int64
+	ChunkSize      int
+	TotalChunks    int
+	ReceivedChunks int
+	TempFilePath   string   // temporary file to write chunks
+	TempFile       *os.File // file handle
+	RecvDir        string
+}
 
 type Config struct {
 	ServerName string `json:"server_name"`
@@ -129,10 +144,10 @@ func getDefaultInterfaceInfo() (*NetworkInfo, error) {
 // getMsgTypeName returns a readable name for the message type
 func getMsgTypeName(msgType byte) string {
 	switch msgType {
-	case msgTypeData:
-		return "DATA"
-	case msgTypeDataAlt:
-		return "DATA_ALT"
+	case msgTypeImageData:
+		return "IMAGE_DATA"
+	case msgTypeVideoData:
+		return "VIDEO_DATA"
 	case msgTypeSyncComplete:
 		return "SYNC_COMPLETE"
 	case msgTypeSetPhoneName:
@@ -153,17 +168,18 @@ func getMsgTypeName(msgType byte) string {
 		return "MEDIA_DOWNLOAD_LIST"
 	case msgTypeMediaDownloadAck:
 		return "MEDIA_DOWNLOAD_ACK"
+	case msgTypeChunkedVideoStart:
+		return "CHUNKED_VIDEO_START"
+	case msgTypeChunkedVideoData:
+		return "CHUNKED_VIDEO_DATA"
+	case msgTypeChunkedVideoComplete:
+		return "CHUNKED_VIDEO_COMPLETE"
 	default:
 		return "UNKNOWN"
 	}
 }
 
 func handleTCPConnection(conn net.Conn, config *Config) {
-	defer func() {
-		log.Printf("Closing connection from %s\n", conn.RemoteAddr().String())
-		conn.Close()
-	}()
-
 	// Determine base receive directory from config (fallback to "received")
 	baseRecvDir := "received"
 	if config != nil && config.ReceiveDir != "" {
@@ -172,6 +188,39 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 
 	// Current receive directory (may be modified by msgTypeSetPhoneName)
 	recvDir := baseRecvDir
+
+	// Track chunked video transfers for this connection
+	chunkedVideos := make(map[string]*ChunkedVideoInfo)
+
+	defer func() {
+		log.Printf("Closing connection from %s\n", conn.RemoteAddr().String())
+
+		// Clean up any incomplete chunked video transfers
+		for id, info := range chunkedVideos {
+			if info.TempFile != nil {
+				info.TempFile.Close()
+			}
+			if info.TempFilePath != "" {
+				os.Remove(info.TempFilePath)
+				log.Printf("Cleaned up incomplete chunked video temp file for %s", id)
+			}
+		}
+
+		conn.Close()
+
+		// Trigger thumbnail generation when connection closes
+		// Only generate if recvDir has been set (i.e., phone name was received)
+		if recvDir != baseRecvDir {
+			log.Printf("Connection closed, triggering thumbnail generation for %s\n", recvDir)
+			go func(dir string) {
+				if err := generateThumbnails(dir); err != nil {
+					log.Printf("Thumbnail generation error: %v\n", err)
+				} else {
+					log.Printf("Thumbnail generation completed for %s\n", dir)
+				}
+			}(recvDir)
+		}
+	}()
 
 	// Protocol: 1 byte type, 4 bytes length (big-endian uint32), then payload
 	// Payload is JSON. JSON: {"id":"...","data":"<base64>","media":"jpg"}
@@ -194,7 +243,7 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 		// Log request header info
 		log.Printf("Request: type=%s(%d), len=%d", msgTypeName, msgType, length)
 
-		if msgType != msgTypeData && msgType != msgTypeDataAlt && msgType != msgTypeSyncComplete && msgType != msgTypeSetPhoneName && msgType != msgTypeGetMediaCount && msgType != msgTypeMediaThumbList {
+		if msgType != msgTypeImageData && msgType != msgTypeVideoData && msgType != msgTypeSyncComplete && msgType != msgTypeSetPhoneName && msgType != msgTypeGetMediaCount && msgType != msgTypeMediaThumbList && msgType != msgTypeChunkedVideoStart && msgType != msgTypeChunkedVideoData && msgType != msgTypeChunkedVideoComplete {
 			log.Printf("Unknown message type %d, closing connection\n", msgType)
 			return
 		}
@@ -217,6 +266,7 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 				log.Printf("Error counting photos in %s: %v\n", recvDir, err)
 				count = 0
 			}
+			log.Printf("GET Thumbnails count %d \n", count)
 
 			data := make([]byte, 4)
 			binary.BigEndian.PutUint32(data, uint32(count))
@@ -229,7 +279,7 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			continue
 		}
 
-		// Handle media thumbnail list request: respond with JSON of thumbnails in subnails, with pagination
+		// Handle media thumbnail list request: respond with JSON of thumbnails in thumbnails folder, with pagination
 		if msgType == msgTypeMediaThumbList {
 			// Defaults
 			pageIndex := 0
@@ -277,12 +327,220 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			}
 			continue
 		}
+
+		// Handle chunked video start
+		if msgType == msgTypeChunkedVideoStart {
+			if length == 0 {
+				log.Printf("Received zero-length chunked video start payload, skipping")
+				continue
+			}
+
+			tmp := make([]byte, length)
+			if _, err := io.ReadFull(conn, tmp); err != nil {
+				log.Printf("Error reading chunked video start payload: %v\n", err)
+				return
+			}
+
+			var req struct {
+				ID          string `json:"id"`
+				Media       string `json:"media"`
+				TotalSize   int64  `json:"totalSize"`
+				ChunkSize   int    `json:"chunkSize"`
+				TotalChunks int    `json:"totalChunks"`
+			}
+			if err := json.Unmarshal(tmp, &req); err != nil {
+				log.Printf("Invalid chunked video start JSON: %v\n", err)
+				continue
+			}
+
+			log.Printf("Chunked video start: id=%s, totalSize=%d, chunkSize=%d, totalChunks=%d",
+				req.ID, req.TotalSize, req.ChunkSize, req.TotalChunks)
+
+			// Create temporary file to write chunks
+			tmpFile, err := os.CreateTemp(recvDir, fmt.Sprintf(".chunked_%s_*.tmp",
+				strings.ReplaceAll(req.ID, string(filepath.Separator), "_")))
+			if err != nil {
+				log.Printf("Error creating temp file for chunked video: %v\n", err)
+				continue
+			}
+			tmpPath := tmpFile.Name()
+			log.Printf("Created temp file for chunked video: %s", tmpPath)
+
+			// Initialize chunked video tracking
+			chunkedVideos[req.ID] = &ChunkedVideoInfo{
+				ID:             req.ID,
+				TotalSize:      req.TotalSize,
+				ChunkSize:      req.ChunkSize,
+				TotalChunks:    req.TotalChunks,
+				ReceivedChunks: 0,
+				TempFilePath:   tmpPath,
+				TempFile:       tmpFile,
+				RecvDir:        recvDir,
+			}
+
+			// Send ACK: OK:START
+			ack := []byte("OK:START")
+			ackHeader := make([]byte, 5)
+			ackHeader[0] = msgTypeAck
+			binary.BigEndian.PutUint32(ackHeader[1:5], uint32(len(ack)))
+			if _, err := conn.Write(append(ackHeader, ack...)); err != nil {
+				log.Printf("Error writing chunked video start ACK: %v\n", err)
+			}
+			continue
+		} // Handle chunked video data
+		if msgType == msgTypeChunkedVideoData {
+			if length == 0 {
+				log.Printf("Received zero-length chunked video data payload, skipping")
+				continue
+			}
+
+			tmp := make([]byte, length)
+			if _, err := io.ReadFull(conn, tmp); err != nil {
+				log.Printf("Error reading chunked video data payload: %v\n", err)
+				return
+			}
+
+			var req struct {
+				ID         string `json:"id"`
+				ChunkIndex int    `json:"chunkIndex"`
+				Data       string `json:"data"`
+			}
+			if err := json.Unmarshal(tmp, &req); err != nil {
+				log.Printf("Invalid chunked video data JSON: %v\n", err)
+				continue
+			}
+
+			// Decode chunk data
+			chunkBytes, err := base64.StdEncoding.DecodeString(req.Data)
+			if err != nil {
+				log.Printf("Error decoding chunk data for id=%s, chunk=%d: %v\n", req.ID, req.ChunkIndex, err)
+				continue
+			}
+
+			log.Printf("Received chunk %d for video %s, size=%d bytes", req.ChunkIndex, req.ID, len(chunkBytes))
+
+			// Write chunk to temporary file
+			if info, exists := chunkedVideos[req.ID]; exists {
+				// Write chunk data to temp file
+				if _, err := info.TempFile.Write(chunkBytes); err != nil {
+					log.Printf("Error writing chunk to temp file: %v\n", err)
+					// Clean up
+					info.TempFile.Close()
+					os.Remove(info.TempFilePath)
+					delete(chunkedVideos, req.ID)
+					continue
+				}
+
+				info.ReceivedChunks++
+				log.Printf("Written chunk %d/%d for video %s to temp file", info.ReceivedChunks, info.TotalChunks, req.ID)
+			} else {
+				log.Printf("Warning: Received chunk for unknown video ID: %s\n", req.ID)
+			}
+
+			// Send ACK: OK:CHUNK:index
+			ack := []byte(fmt.Sprintf("OK:CHUNK:%d", req.ChunkIndex))
+			ackHeader := make([]byte, 5)
+			ackHeader[0] = msgTypeAck
+			binary.BigEndian.PutUint32(ackHeader[1:5], uint32(len(ack)))
+			if _, err := conn.Write(append(ackHeader, ack...)); err != nil {
+				log.Printf("Error writing chunked video data ACK: %v\n", err)
+			}
+			continue
+		}
+
+		// Handle chunked video complete
+		if msgType == msgTypeChunkedVideoComplete {
+			if length == 0 {
+				log.Printf("Received zero-length chunked video complete payload, skipping")
+				continue
+			}
+
+			tmp := make([]byte, length)
+			if _, err := io.ReadFull(conn, tmp); err != nil {
+				log.Printf("Error reading chunked video complete payload: %v\n", err)
+				return
+			}
+
+			var req struct {
+				ID          string `json:"id"`
+				TotalChunks int    `json:"totalChunks"`
+			}
+			if err := json.Unmarshal(tmp, &req); err != nil {
+				log.Printf("Invalid chunked video complete JSON: %v\n", err)
+				continue
+			}
+
+			log.Printf("Chunked video complete: id=%s, totalChunks=%d", req.ID, req.TotalChunks)
+
+			// Finalize the video file
+			if info, exists := chunkedVideos[req.ID]; exists {
+				// Close temp file
+				info.TempFile.Close()
+
+				// Verify received chunks count
+				if info.ReceivedChunks != info.TotalChunks {
+					log.Printf("Warning: Expected %d chunks but received %d for video %s",
+						info.TotalChunks, info.ReceivedChunks, req.ID)
+				}
+
+				// Determine final filename
+				ext := strings.ToLower(filepath.Ext(req.ID))
+				if ext == "" {
+					ext = ".mp4" // default to mp4
+				}
+
+				var fname string
+				if strings.ToLower(filepath.Ext(req.ID)) != "" {
+					fname = filepath.Join(info.RecvDir, req.ID)
+				} else {
+					fname = filepath.Join(info.RecvDir, req.ID+ext)
+				}
+
+				// Move temp file to final location
+				if err := os.Rename(info.TempFilePath, fname); err != nil {
+					log.Printf("Error moving temp file to final location %s: %v\n", fname, err)
+					// Try copy and delete as fallback
+					if copyErr := copyFile(info.TempFilePath, fname); copyErr != nil {
+						log.Printf("Error copying temp file: %v\n", copyErr)
+					} else {
+						os.Remove(info.TempFilePath)
+						// Get file size
+						if fileInfo, statErr := os.Stat(fname); statErr == nil {
+							log.Printf("Saved chunked video: %s (size=%d bytes, chunks=%d)\n",
+								fname, fileInfo.Size(), info.TotalChunks)
+						}
+					}
+				} else {
+					// Get file size
+					if fileInfo, err := os.Stat(fname); err == nil {
+						log.Printf("Saved chunked video: %s (size=%d bytes, chunks=%d)\n",
+							fname, fileInfo.Size(), info.TotalChunks)
+					}
+				}
+
+				// Clean up tracking
+				delete(chunkedVideos, req.ID)
+			} else {
+				log.Printf("Warning: Received complete signal for unknown video ID: %s\n", req.ID)
+			}
+
+			// Send ACK: OK:video_id
+			ack := []byte("OK:" + req.ID)
+			ackHeader := make([]byte, 5)
+			ackHeader[0] = msgTypeAck
+			binary.BigEndian.PutUint32(ackHeader[1:5], uint32(len(ack)))
+			if _, err := conn.Write(append(ackHeader, ack...)); err != nil {
+				log.Printf("Error writing chunked video complete ACK: %v\n", err)
+			}
+			continue
+		}
+
 		if length == 0 {
 			log.Printf("Received zero-length payload, skipping")
 			continue
 		}
 
-		if length > 50*1024*1024 { // limit 50MB for safety
+		if length > 500*1024*1024 { // limit 500MB for safety (to handle large videos)
 			log.Printf("Payload too large (%d bytes), closing connection\n", length)
 			return
 		}
@@ -384,6 +642,24 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			log.Printf("Error writing ACK to client: %v\n", err)
 		}
 	}
+}
+
+// copyFile copies a file from src to dst
+func copyFile(src, dst string) error {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer destFile.Close()
+
+	_, err = io.Copy(destFile, sourceFile)
+	return err
 }
 
 func startTCPServer(config *Config) error {
@@ -515,13 +791,13 @@ func convertHEICToImage(heicPath string) (image.Image, string, error) {
 
 	log.Printf("Successfully converted HEIC to %s using %s", format, conversionMethod)
 	return img, format, nil
-} // generateThumbnails scans the phone directory and writes thumbnails into a subdirectory named "subnails".
+} // generateThumbnails scans the phone directory and writes thumbnails into a subdirectory named "thumbnails".
 // For photos (jpg/jpeg/png): thumbnails keep the original extension and are named with prefix "tbn-".
 // For videos (mp4/mov/m4v/avi/mkv): thumbnails are JPEG files named "tbn-<original-basename>.jpg".
 func generateThumbnails(parentDir string) error {
-	thumbDir := filepath.Join(parentDir, "subnails")
+	thumbDir := filepath.Join(parentDir, "thumbnails")
 	if err := os.MkdirAll(thumbDir, 0o755); err != nil {
-		return fmt.Errorf("creating subnails dir: %w", err)
+		return fmt.Errorf("creating thumbnails dir: %w", err)
 	}
 
 	entries, err := os.ReadDir(parentDir)
@@ -542,7 +818,14 @@ func generateThumbnails(parentDir string) error {
 
 		// Handle images
 		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".heic" {
-			thumbPath := filepath.Join(thumbDir, "tbn-"+name)
+			// For HEIC files, thumbnail will be saved as .jpg
+			thumbName := name
+			if ext == ".heic" {
+				// Replace .heic extension with .jpg for thumbnail
+				base := strings.TrimSuffix(name, ext)
+				thumbName = base + ".jpg"
+			}
+			thumbPath := filepath.Join(thumbDir, "tbn-"+thumbName)
 			if _, err := os.Stat(thumbPath); err == nil {
 				// already exists
 				continue
@@ -630,12 +913,14 @@ func generateThumbnails(parentDir string) error {
 				log.Printf("create thumbnail failed %s: %v", thumbPath, err)
 				continue
 			}
-			switch ext {
-			case ".png":
+			// HEIC files are converted to JPEG, so encode as JPEG
+			// PNG files keep PNG format, all others (including HEIC) use JPEG
+			if ext == ".png" && !isHEIC {
 				if err := png.Encode(out, thumbImg); err != nil {
 					log.Printf("encode png failed %s: %v", thumbPath, err)
 				}
-			default: // jpg/jpeg and others -> jpeg
+			} else {
+				// jpg/jpeg/heic and others -> jpeg
 				if err := jpeg.Encode(out, thumbImg, &jpeg.Options{Quality: 80}); err != nil {
 					log.Printf("encode jpeg failed %s: %v", thumbPath, err)
 				}
@@ -707,13 +992,13 @@ func generateVideoThumbnail(srcPath, dstPath string) error {
 // buildThumbsJSONPayloadPaged is like buildThumbsJSONPayload but returns only a page
 // of thumbnails based on pageIndex (0-based) and pageSize. Stable order by filename.
 func buildThumbsJSONPayloadPaged(dir string, pageIndex, pageSize int) ([]byte, error) {
-	thumbDir := filepath.Join(dir, "subnails")
+	thumbDir := filepath.Join(dir, "thumbnails")
 	entries, err := os.ReadDir(thumbDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return []byte(`{"photos":[]}`), nil
 		}
-		return nil, fmt.Errorf("read subnails dir: %w", err)
+		return nil, fmt.Errorf("read thumbnails dir: %w", err)
 	}
 
 	// Filter to image files only and sort stably by name
@@ -723,7 +1008,7 @@ func buildThumbsJSONPayloadPaged(dir string, pageIndex, pageSize int) ([]byte, e
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(e.Name()))
-		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
+		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".heic" {
 			names = append(names, e.Name())
 		}
 	}
@@ -799,24 +1084,24 @@ func buildThumbsJSONPayloadPaged(dir string, pageIndex, pageSize int) ([]byte, e
 	return json.Marshal(out)
 }
 
-// countPhotosInDir returns the number of photo files directly under dir (non-recursive),
-// excluding the thumbnails directory ("subnails"). Photo extensions considered: jpg, jpeg, png.
+// countPhotosInDir returns the number of thumbnail files in the thumbnails directory.
+// This counts jpg, jpeg, png, and heic thumbnails.
 func countPhotosInDir(dir string) (int, error) {
-	entries, err := os.ReadDir(dir)
+	thumbDir := filepath.Join(dir, "thumbnails")
+	entries, err := os.ReadDir(thumbDir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
 		return 0, err
 	}
 	count := 0
 	for _, e := range entries {
 		if e.IsDir() {
-			// skip any subdirectory, especially the thumbnails directory
-			if strings.EqualFold(e.Name(), "subnails") {
-				continue
-			}
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(e.Name()))
-		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".mp4" || ext == ".mov" || ext == ".m4v" || ext == ".avi" || ext == ".mkv" {
+		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".heic" {
 			count++
 		}
 	}
