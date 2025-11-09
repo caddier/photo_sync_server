@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	_ "image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -125,6 +126,38 @@ func getDefaultInterfaceInfo() (*NetworkInfo, error) {
 	return nil, fmt.Errorf("no suitable network interface found")
 }
 
+// getMsgTypeName returns a readable name for the message type
+func getMsgTypeName(msgType byte) string {
+	switch msgType {
+	case msgTypeData:
+		return "DATA"
+	case msgTypeDataAlt:
+		return "DATA_ALT"
+	case msgTypeSyncComplete:
+		return "SYNC_COMPLETE"
+	case msgTypeSetPhoneName:
+		return "SET_PHONE_NAME"
+	case msgTypeGetMediaCount:
+		return "GET_MEDIA_COUNT"
+	case msgTypeMediaCountRsp:
+		return "MEDIA_COUNT_RSP"
+	case msgTypeMediaThumbList:
+		return "MEDIA_THUMB_LIST"
+	case msgTypeMediaThumbData:
+		return "MEDIA_THUMB_DATA"
+	case msgTypeMediaDelList:
+		return "MEDIA_DEL_LIST"
+	case msgTypeMediaDelAck:
+		return "MEDIA_DEL_ACK"
+	case msgTypeMediaDownloadList:
+		return "MEDIA_DOWNLOAD_LIST"
+	case msgTypeMediaDownloadAck:
+		return "MEDIA_DOWNLOAD_ACK"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 func handleTCPConnection(conn net.Conn, config *Config) {
 	defer func() {
 		log.Printf("Closing connection from %s\n", conn.RemoteAddr().String())
@@ -153,6 +186,14 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 		}
 
 		msgType := header[0]
+		length := binary.BigEndian.Uint32(header[1:5])
+
+		// Get readable message type name
+		msgTypeName := getMsgTypeName(msgType)
+
+		// Log request header info
+		log.Printf("Request: type=%s(%d), len=%d", msgTypeName, msgType, length)
+
 		if msgType != msgTypeData && msgType != msgTypeDataAlt && msgType != msgTypeSyncComplete && msgType != msgTypeSetPhoneName && msgType != msgTypeGetMediaCount && msgType != msgTypeMediaThumbList {
 			log.Printf("Unknown message type %d, closing connection\n", msgType)
 			return
@@ -168,8 +209,6 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			return
 		}
 
-		length := binary.BigEndian.Uint32(header[1:5])
-
 		// Handle media count request immediately; request payload is ignored if present
 		if msgType == msgTypeGetMediaCount {
 			if length > 0 {
@@ -179,6 +218,19 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 					log.Printf("Error discarding media count payload: %v\n", err)
 					return
 				}
+				// Log first 10 bytes
+				previewLen := 10
+				if len(tmp) < previewLen {
+					previewLen = len(tmp)
+				}
+				preview := string(tmp[:previewLen])
+				previewBytes := []byte(preview)
+				for i := range previewBytes {
+					if previewBytes[i] < 32 || previewBytes[i] > 126 {
+						previewBytes[i] = '.'
+					}
+				}
+				log.Printf("  Payload preview (first %d bytes): %q", previewLen, string(previewBytes))
 			}
 
 			count, err := countPhotosInDir(recvDir)
@@ -211,6 +263,20 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 					log.Printf("Error reading thumb list payload: %v\n", err)
 					return
 				}
+				// Log first 10 bytes
+				previewLen := 10
+				if len(tmp) < previewLen {
+					previewLen = len(tmp)
+				}
+				preview := string(tmp[:previewLen])
+				previewBytes := []byte(preview)
+				for i := range previewBytes {
+					if previewBytes[i] < 32 || previewBytes[i] > 126 {
+						previewBytes[i] = '.'
+					}
+				}
+				log.Printf("  Payload preview (first %d bytes): %q", previewLen, string(previewBytes))
+
 				var req struct {
 					PageIndex int `json:"pageIndex"`
 					PageSize  int `json:"pageSize"`
@@ -252,13 +318,26 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			return
 		}
 
-		log.Printf("msg type %d len %d \n", msgType, length)
-
 		payload := make([]byte, length)
 		if _, err := io.ReadFull(conn, payload); err != nil {
 			log.Printf("Error reading payload: %v\n", err)
 			return
 		}
+
+		// Log first 10 bytes of payload as string (for debugging)
+		previewLen := 10
+		if len(payload) < previewLen {
+			previewLen = len(payload)
+		}
+		preview := string(payload[:previewLen])
+		// Replace non-printable characters with '.'
+		previewBytes := []byte(preview)
+		for i := range previewBytes {
+			if previewBytes[i] < 32 || previewBytes[i] > 126 {
+				previewBytes[i] = '.'
+			}
+		}
+		log.Printf("  Payload preview (first %d bytes): %q", previewLen, string(previewBytes))
 
 		if msgType == msgTypeSetPhoneName {
 			//client phone name is in this request,
@@ -296,6 +375,16 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			continue
 		}
 
+		// Log decoded file info and first 16 bytes for validation
+		log.Printf("Decoded file id=%s, size=%d bytes, base64_len=%d", obj.ID, len(fileBytes), len(obj.Data))
+		if len(fileBytes) > 0 {
+			previewBytes := 16
+			if len(fileBytes) < previewBytes {
+				previewBytes = len(fileBytes)
+			}
+			log.Printf("  First %d bytes: %x", previewBytes, fileBytes[:previewBytes])
+		}
+
 		// Save to <recvDir>/<id>.<ext>
 		ext := strings.ToLower(obj.Media)
 		// sanitize ext to prevent path issues: keep letters/numbers
@@ -303,7 +392,26 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			ext = "bin"
 		}
 
-		fname := filepath.Join(recvDir, fmt.Sprintf("%s.%s", obj.ID, ext))
+		// Check if ID already has the extension to avoid double extensions
+		var fname string
+		idExt := strings.ToLower(filepath.Ext(obj.ID))
+		expectedExt := "." + ext
+		if idExt == expectedExt {
+			// ID already has the correct extension
+			fname = filepath.Join(recvDir, obj.ID)
+		} else {
+			// Need to add extension
+			fname = filepath.Join(recvDir, fmt.Sprintf("%s.%s", obj.ID, ext))
+		}
+
+		// Create parent directories if obj.ID contains path separators
+		if dir := filepath.Dir(fname); dir != recvDir {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				log.Printf("Error creating directory for id=%s: %v\n", obj.ID, err)
+				continue
+			}
+		}
+
 		if err := os.WriteFile(fname, fileBytes, 0o644); err != nil {
 			log.Printf("Error saving file for id=%s: %v\n", obj.ID, err)
 			continue
@@ -408,7 +516,52 @@ func startUDPServer(config *Config) error {
 	}
 }
 
-// generateThumbnails scans the phone directory and writes thumbnails into a subdirectory named "subnails".
+// convertHEICToImage converts a HEIC file to JPEG using ImageMagick and returns the decoded image
+func convertHEICToImage(heicPath string) (image.Image, string, error) {
+	// Create a temporary JPEG file
+	tmpFile, err := os.CreateTemp("", "heic-convert-*.jpg")
+	if err != nil {
+		return nil, "", fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	var cmd *exec.Cmd
+	var conversionMethod string
+
+	// Try ImageMagick first (best HEIC support)
+	if _, err := exec.LookPath("magick"); err == nil {
+		cmd = exec.Command("magick", "convert", heicPath, tmpPath)
+		conversionMethod = "ImageMagick"
+	} else if _, err := exec.LookPath("convert"); err == nil {
+		// Try older ImageMagick command
+		cmd = exec.Command("convert", heicPath, tmpPath)
+		conversionMethod = "ImageMagick (convert)"
+	} else {
+		return nil, "", fmt.Errorf("ImageMagick not found. Please install ImageMagick for HEIC support")
+	}
+
+	log.Printf("Converting HEIC using %s: %s", conversionMethod, heicPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, "", fmt.Errorf("%s conversion failed: %w, output: %s", conversionMethod, err, string(output))
+	}
+
+	// Open and decode the converted JPEG
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("open converted image: %w", err)
+	}
+	defer f.Close()
+
+	img, format, err := image.Decode(f)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode converted image: %w", err)
+	}
+
+	log.Printf("Successfully converted HEIC to %s using %s", format, conversionMethod)
+	return img, format, nil
+} // generateThumbnails scans the phone directory and writes thumbnails into a subdirectory named "subnails".
 // For photos (jpg/jpeg/png): thumbnails keep the original extension and are named with prefix "tbn-".
 // For videos (mp4/mov/m4v/avi/mkv): thumbnails are JPEG files named "tbn-<original-basename>.jpg".
 func generateThumbnails(parentDir string) error {
@@ -434,23 +587,66 @@ func generateThumbnails(parentDir string) error {
 		srcPath := filepath.Join(parentDir, name)
 
 		// Handle images
-		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
+		if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".heic" {
 			thumbPath := filepath.Join(thumbDir, "tbn-"+name)
 			if _, err := os.Stat(thumbPath); err == nil {
 				// already exists
 				continue
 			}
 
-			f, err := os.Open(srcPath)
-			if err != nil {
-				log.Printf("open source image failed %s: %v", srcPath, err)
-				continue
+			// Check if file is actually HEIC (even if extension says .jpg)
+			isHEIC := false
+			if f, err := os.Open(srcPath); err == nil {
+				header := make([]byte, 12)
+				n, _ := io.ReadFull(f, header)
+				f.Close()
+				// HEIC files start with: ftyp (at offset 4)
+				if n >= 12 && string(header[4:8]) == "ftyp" {
+					heicType := string(header[8:12])
+					log.Printf("File %s has ftyp signature, type: %q (hex: %x)", name, heicType, header)
+					if heicType == "heic" || heicType == "heix" || heicType == "mif1" {
+						isHEIC = true
+					}
+				} else if n > 0 {
+					log.Printf("File %s header (first %d bytes): %x", name, n, header[:n])
+				}
 			}
-			img, _, err := image.Decode(f)
-			_ = f.Close()
-			if err != nil {
-				log.Printf("decode image failed %s: %v", srcPath, err)
-				continue
+
+			var img image.Image
+			var format string
+			var err error
+
+			if isHEIC {
+				// Convert HEIC to JPEG using ffmpeg, then decode
+				img, format, err = convertHEICToImage(srcPath)
+				if err != nil {
+					log.Printf("failed to convert HEIC %s: %v", srcPath, err)
+					continue
+				}
+			} else {
+				// Standard image decoding
+				f, err := os.Open(srcPath)
+				if err != nil {
+					log.Printf("open source image failed %s: %v", srcPath, err)
+					continue
+				}
+
+				img, format, err = image.Decode(f)
+				_ = f.Close()
+				if err != nil {
+					// Check file size and first few bytes for debugging
+					info, _ := os.Stat(srcPath)
+					firstBytes := make([]byte, 16)
+					if tmpF, tmpErr := os.Open(srcPath); tmpErr == nil {
+						io.ReadFull(tmpF, firstBytes)
+						tmpF.Close()
+						log.Printf("decode image failed %s (size: %d, format detected: %s, first bytes: %x): %v",
+							srcPath, info.Size(), format, firstBytes, err)
+					} else {
+						log.Printf("decode image failed %s: %v", srcPath, err)
+					}
+					continue
+				}
 			}
 
 			// calculate thumbnail size (max width 320px, keep aspect)

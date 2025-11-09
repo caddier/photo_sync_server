@@ -943,7 +943,8 @@ func startHTTPServer(config *Config) error {
 			base = base[4:]
 		}
 
-		// Candidate lists
+		// Check if base contains subdirectory information (from iOS nested structure)
+		// Try to find the original file in nested directories
 		imageExts := []string{thumbExt}
 		// normalize and expand common image extensions in case thumbnail ext differs
 		if thumbExt == ".jpeg" {
@@ -957,6 +958,7 @@ func startHTTPServer(config *Config) error {
 
 		// First try images
 		for _, ext := range imageExts {
+			// Try with nested path structure (iOS might use subdirectories)
 			orig := filepath.Join(phoneDir, base+ext)
 			if _, err := os.Stat(orig); err == nil {
 				http.ServeFile(w, r, orig)
@@ -973,6 +975,7 @@ func startHTTPServer(config *Config) error {
 			}
 		}
 
+		log.Printf("File not found for thumbName=%s, base=%s in phoneDir=%s", thumbName, base, phoneDir)
 		http.NotFound(w, r)
 	}).Methods("GET")
 
