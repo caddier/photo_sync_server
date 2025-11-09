@@ -211,27 +211,6 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 
 		// Handle media count request immediately; request payload is ignored if present
 		if msgType == msgTypeGetMediaCount {
-			if length > 0 {
-				// Read and discard request payload
-				tmp := make([]byte, length)
-				if _, err := io.ReadFull(conn, tmp); err != nil {
-					log.Printf("Error discarding media count payload: %v\n", err)
-					return
-				}
-				// Log first 10 bytes
-				previewLen := 10
-				if len(tmp) < previewLen {
-					previewLen = len(tmp)
-				}
-				preview := string(tmp[:previewLen])
-				previewBytes := []byte(preview)
-				for i := range previewBytes {
-					if previewBytes[i] < 32 || previewBytes[i] > 126 {
-						previewBytes[i] = '.'
-					}
-				}
-				log.Printf("  Payload preview (first %d bytes): %q", previewLen, string(previewBytes))
-			}
 
 			count, err := countPhotosInDir(recvDir)
 			if err != nil {
@@ -263,19 +242,9 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 					log.Printf("Error reading thumb list payload: %v\n", err)
 					return
 				}
-				// Log first 10 bytes
-				previewLen := 10
-				if len(tmp) < previewLen {
-					previewLen = len(tmp)
-				}
-				preview := string(tmp[:previewLen])
-				previewBytes := []byte(preview)
-				for i := range previewBytes {
-					if previewBytes[i] < 32 || previewBytes[i] > 126 {
-						previewBytes[i] = '.'
-					}
-				}
-				log.Printf("  Payload preview (first %d bytes): %q", previewLen, string(previewBytes))
+
+				// Log full JSON body for MEDIA_THUMB_LIST
+				log.Printf("MEDIA_THUMB_LIST payload (JSON): %s", string(tmp))
 
 				var req struct {
 					PageIndex int `json:"pageIndex"`
@@ -324,25 +293,10 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			return
 		}
 
-		// Log first 10 bytes of payload as string (for debugging)
-		previewLen := 10
-		if len(payload) < previewLen {
-			previewLen = len(payload)
-		}
-		preview := string(payload[:previewLen])
-		// Replace non-printable characters with '.'
-		previewBytes := []byte(preview)
-		for i := range previewBytes {
-			if previewBytes[i] < 32 || previewBytes[i] > 126 {
-				previewBytes[i] = '.'
-			}
-		}
-		log.Printf("  Payload preview (first %d bytes): %q", previewLen, string(previewBytes))
-
 		if msgType == msgTypeSetPhoneName {
 			//client phone name is in this request,
 			phoneName := string(payload)
-			log.Printf("Client phone name: %s\n", phoneName)
+			log.Printf("SET_PHONE_NAME payload (full string): %s", phoneName)
 			//create a sub directory under receive dir
 			recvDir = filepath.Join(baseRecvDir, phoneName)
 			if err := os.MkdirAll(recvDir, 0o755); err != nil {
@@ -867,29 +821,6 @@ func countPhotosInDir(dir string) (int, error) {
 		}
 	}
 	return count, nil
-}
-
-// getSortedFileList returns a stable-sorted list of filenames (not directories) in the given directory.
-// Files are sorted lexicographically by name. Uses stable sort to preserve original order for equal names.
-func getSortedFileList(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read directory: %w", err)
-	}
-
-	var files []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			files = append(files, e.Name())
-		}
-	}
-
-	// Stable sort by filename
-	sort.SliceStable(files, func(i, j int) bool {
-		return files[i] < files[j]
-	})
-
-	return files, nil
 }
 
 func main() {
