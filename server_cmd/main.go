@@ -65,6 +65,13 @@ type ChunkedVideoInfo struct {
 	RecvDir        string
 }
 
+// Global state for thumbnail generation control
+var (
+	thumbnailGenerationMutex sync.Mutex
+	thumbnailCancelFunc      context.CancelFunc
+	thumbnailCancelMutex     sync.Mutex
+)
+
 type Config struct {
 	ServerName string `json:"server_name"`
 	ReceiveDir string `json:"receive_dir"`
@@ -213,11 +220,27 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 		if recvDir != baseRecvDir {
 			log.Printf("Connection closed, triggering thumbnail generation for %s\n", recvDir)
 			go func(dir string) {
-				if err := generateThumbnails(dir); err != nil {
-					log.Printf("Thumbnail generation error: %v\n", err)
+				ctx, cancel := context.WithCancel(context.Background())
+
+				// Store cancel function so it can be called when new sync starts
+				thumbnailCancelMutex.Lock()
+				thumbnailCancelFunc = cancel
+				thumbnailCancelMutex.Unlock()
+
+				if err := generateThumbnails(ctx, dir); err != nil {
+					if err == context.Canceled {
+						log.Printf("Thumbnail generation cancelled for %s\n", dir)
+					} else {
+						log.Printf("Thumbnail generation error: %v\n", err)
+					}
 				} else {
 					log.Printf("Thumbnail generation completed for %s\n", dir)
 				}
+
+				// Clear cancel function after completion
+				thumbnailCancelMutex.Lock()
+				thumbnailCancelFunc = nil
+				thumbnailCancelMutex.Unlock()
 			}(recvDir)
 		}
 	}()
@@ -251,14 +274,13 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 		if msgType == msgTypeSyncComplete {
 			log.Printf("Received sync complete message type, generating thumbnails under %s\n", recvDir)
 			go func() {
-				if err := generateThumbnails(recvDir); err != nil {
+				ctx := context.Background()
+				if err := generateThumbnails(ctx, recvDir); err != nil {
 					log.Printf("Thumbnail generation error: %v\n", err)
 				}
 			}()
 			return
-		}
-
-		// Handle media count request immediately; request payload is ignored if present
+		} // Handle media count request immediately; request payload is ignored if present
 		if msgType == msgTypeGetMediaCount {
 
 			count, err := countPhotosInDir(recvDir)
@@ -552,6 +574,14 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 		}
 
 		if msgType == msgTypeSetPhoneName {
+			// Cancel any running thumbnail generation when new sync starts
+			thumbnailCancelMutex.Lock()
+			if thumbnailCancelFunc != nil {
+				log.Printf("Cancelling ongoing thumbnail generation (new sync starting)")
+				thumbnailCancelFunc()
+			}
+			thumbnailCancelMutex.Unlock()
+
 			//client phone name is in this request,
 			phoneName := string(payload)
 			log.Printf("SET_PHONE_NAME payload (full string): %s", phoneName)
@@ -562,9 +592,7 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 				return
 			}
 			continue
-		}
-
-		// Parse JSON
+		} // Parse JSON
 		var obj struct {
 			ID    string `json:"id"`
 			Data  string `json:"data"`
@@ -794,7 +822,13 @@ func convertHEICToImage(heicPath string) (image.Image, string, error) {
 } // generateThumbnails scans the phone directory and writes thumbnails into a subdirectory named "thumbnails".
 // For photos (jpg/jpeg/png): thumbnails keep the original extension and are named with prefix "tbn-".
 // For videos (mp4/mov/m4v/avi/mkv): thumbnails are JPEG files named "tbn-<original-basename>.jpg".
-func generateThumbnails(parentDir string) error {
+func generateThumbnails(ctx context.Context, parentDir string) error {
+	// Acquire lock to ensure only one thumbnail generation at a time
+	thumbnailGenerationMutex.Lock()
+	defer thumbnailGenerationMutex.Unlock()
+
+	log.Printf("Starting thumbnail generation for %s (acquired lock)", parentDir)
+
 	thumbDir := filepath.Join(parentDir, "thumbnails")
 	if err := os.MkdirAll(thumbDir, 0o755); err != nil {
 		return fmt.Errorf("creating thumbnails dir: %w", err)
@@ -806,6 +840,14 @@ func generateThumbnails(parentDir string) error {
 	}
 
 	for _, e := range entries {
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			log.Printf("Thumbnail generation cancelled for %s", parentDir)
+			return ctx.Err()
+		default:
+		}
+
 		if e.IsDir() {
 			continue
 		}
