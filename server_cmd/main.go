@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -25,6 +26,7 @@ import (
 )
 
 const (
+	version    = "1.0.0"
 	tcpPort    = ":9922"
 	udpPort    = ":7799"
 	bufferSize = 1024
@@ -78,8 +80,8 @@ type Config struct {
 	HttpPort   string `json:"http_port"`
 }
 
-func loadConfig() (*Config, error) {
-	file, err := os.ReadFile("config.json")
+func loadConfig(configPath string) (*Config, error) {
+	file, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("error reading config file: %v", err)
 	}
@@ -1151,10 +1153,21 @@ func countPhotosInDir(dir string) (int, error) {
 }
 
 func main() {
+	// Parse command-line flags
+	showVersion := flag.Bool("v", false, "show version and exit")
+	configPath := flag.String("f", "config.json", "path to config file")
+	flag.Parse()
+
+	// Show version and exit if requested
+	if *showVersion {
+		fmt.Printf("Photo Sync Server version %s\n", version)
+		os.Exit(0)
+	}
+
 	// Load configuration
-	config, err := loadConfig()
+	config, err := loadConfig(*configPath)
 	if err != nil {
-		log.Printf("Error loading config: %v\n", err)
+		log.Printf("Error loading config from %s: %v\n", *configPath, err)
 		config = &Config{ServerName: "unknown"} // Use default name if config fails
 	}
 
