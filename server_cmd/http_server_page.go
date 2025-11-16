@@ -247,21 +247,28 @@ func startHTTPServer(config *Config) error {
 <head>
     <title>Photo Sync Server - Phone Directories</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        h1 { color: #333; }
-        .phone-list { list-style: none; padding: 0; }
-        .phone-list li { margin: 10px 0; }
+        body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; margin: 0; padding: 20px; background: #000000; color: #ffffff; }
+        h1 { color: #ffffff; font-weight: 300; letter-spacing: 1px; }
+        .phone-list { list-style: none; padding: 0; max-width: 600px; }
+        .phone-list li { margin: 15px 0; }
         .phone-list a { 
             display: block; 
-            padding: 15px; 
-            background: white; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%); 
             text-decoration: none; 
-            color: #333; 
-            border-radius: 5px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            transition: transform 0.2s;
+            color: #ffffff; 
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            transition: all 0.3s ease;
+            border: 1px solid #2a2a2a;
+            font-size: 16px;
         }
-        .phone-list a:hover { transform: translateX(5px); background: #e3f2fd; }
+        .phone-list a:hover { 
+            transform: translateX(10px); 
+            background: linear-gradient(135deg, #2a2a2a 0%, #3a3a3a 100%); 
+            border-color: #667eea;
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
     </style>
 </head>
 <body>
@@ -373,7 +380,7 @@ func startHTTPServer(config *Config) error {
 		sort.Strings(thumbFiles)
 
 		// Pagination logic
-		const itemsPerPage = 33
+		const itemsPerPage = 44
 		totalItems := len(thumbFiles)
 		totalPages := (totalItems + itemsPerPage - 1) / itemsPerPage
 		if totalPages < 1 {
@@ -399,18 +406,23 @@ func startHTTPServer(config *Config) error {
 <head>
     <title>{{.PhoneName}} - Thumbnails</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        h1 { color: #333; }
+        body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; margin: 0; padding: 20px; background: #000000; color: #ffffff; }
+        h1 { color: #ffffff; font-weight: 300; letter-spacing: 1px; }
         .back-link { 
             display: inline-block; 
             margin-bottom: 20px; 
             padding: 10px 20px; 
-            background: #2196F3; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
             color: white; 
             text-decoration: none; 
-            border-radius: 5px;
+            border-radius: 8px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
         }
-        .back-link:hover { background: #1976D2; }
+        .back-link:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
         .info-bar {
             display: flex;
             justify-content: space-between;
@@ -419,7 +431,23 @@ func startHTTPServer(config *Config) error {
             flex-wrap: wrap;
             gap: 10px;
         }
-        .count { color: #666; margin: 0; }
+        .select-all-btn {
+            padding: 10px 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+        }
+        .select-all-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.6);
+        }
+        .count { color: #aaaaaa; margin: 0; font-size: 14px; }
         .pagination {
             display: flex;
             gap: 5px;
@@ -427,57 +455,76 @@ func startHTTPServer(config *Config) error {
         }
         .pagination a, .pagination span {
             padding: 8px 12px;
-            border-radius: 3px;
+            border-radius: 6px;
             text-decoration: none;
-            background: white;
-            color: #333;
-            border: 1px solid #ddd;
+            background: #1a1a1a;
+            color: #ffffff;
+            border: 1px solid #333333;
+            transition: all 0.2s ease;
         }
-        .pagination a:hover { background: #e3f2fd; }
+        .pagination a:hover { 
+            background: #2a2a2a;
+            border-color: #667eea;
+            transform: scale(1.05);
+        }
         .pagination .current {
-            background: #2196F3;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            border-color: #2196F3;
+            border-color: #667eea;
+            box-shadow: 0 2px 10px rgba(102, 126, 234, 0.4);
         }
         .pagination .disabled {
-            color: #ccc;
+            color: #555555;
             cursor: not-allowed;
+            background: #0a0a0a;
         }
         .gallery { 
             display: grid; 
             grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); 
-            gap: 15px; 
+            gap: 20px; 
             padding: 10px;
         }
         .gallery-item { 
-            background: white; 
+            background: #1a1a1a; 
             padding: 10px; 
-            border-radius: 5px; 
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 12px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
             text-align: center;
+            transition: all 0.3s ease;
+            border: 1px solid #2a2a2a;
+        }
+        .gallery-item:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+            border-color: #667eea;
         }
         .gallery-item img { 
             width: 180px;
             height: 180px;
             object-fit: cover;
-            border-radius: 3px;
+            border-radius: 8px;
             cursor: pointer;
+            transition: all 0.3s ease;
         }
-        .gallery-item img:hover { opacity: 0.8; }
+        .gallery-item img:hover { 
+            opacity: 0.9;
+            transform: scale(1.05);
+        }
         .filename { 
             margin-top: 8px; 
             font-size: 12px; 
-            color: #666; 
+            color: #888888; 
             word-break: break-all;
         }
         .selection-bar {
             position: fixed;
             bottom: 20px;
             right: 20px;
-            background: white;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%);
             padding: 15px 20px;
-            border-radius: 10px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+            border: 1px solid #333333;
             display: none;
             z-index: 1000;
         }
@@ -486,22 +533,33 @@ func startHTTPServer(config *Config) error {
             padding: 10px 20px;
             margin: 0 5px;
             border: none;
-            border-radius: 5px;
+            border-radius: 8px;
             cursor: pointer;
             font-size: 14px;
+            transition: all 0.3s ease;
+            font-weight: 500;
         }
         .create-video-btn {
-            background: #4CAF50;
+            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
             color: white;
+            box-shadow: 0 2px 8px rgba(76, 175, 80, 0.4);
         }
-        .create-video-btn:hover { background: #45a049; }
+        .create-video-btn:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(76, 175, 80, 0.6);
+        }
         .clear-selection-btn {
-            background: #f44336;
+            background: linear-gradient(135deg, #f44336 0%, #da190b 100%);
             color: white;
+            box-shadow: 0 2px 8px rgba(244, 67, 54, 0.4);
         }
-        .clear-selection-btn:hover { background: #da190b; }
+        .clear-selection-btn:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(244, 67, 54, 0.6);
+        }
         .gallery-item.selected {
-            border: 3px solid #4CAF50;
+            border: 3px solid #667eea;
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.5);
         }
         .gallery-item .checkbox {
             position: relative;
@@ -524,44 +582,67 @@ func startHTTPServer(config *Config) error {
             top: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.7);
+            background: rgba(0,0,0,0.85);
         }
         #videoModal .modal-content {
-            background: white;
+            background: #1a1a1a;
             margin: 10% auto;
             padding: 30px;
             width: 500px;
-            border-radius: 10px;
+            border-radius: 12px;
+            border: 1px solid #333333;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.8);
         }
-        #videoModal h2 { margin-top: 0; }
+        #videoModal h2 { margin-top: 0; color: #ffffff; }
         #videoModal input, #videoModal select {
             width: 100%;
             padding: 10px;
             margin: 10px 0;
-            border: 1px solid #ddd;
-            border-radius: 5px;
+            border: 1px solid #333333;
+            border-radius: 8px;
             box-sizing: border-box;
+            background: #0a0a0a;
+            color: #ffffff;
+            transition: border-color 0.3s ease;
+        }
+        #videoModal input:focus, #videoModal select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
         #videoModal button {
             padding: 10px 20px;
             margin: 10px 5px 0 0;
             border: none;
-            border-radius: 5px;
+            border-radius: 8px;
             cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
         }
-        .modal-create { background: #4CAF50; color: white; }
-        .modal-create:hover { background: #45a049; }
-        .modal-cancel { background: #ccc; color: #333; }
-        .modal-cancel:hover { background: #bbb; }
+        .modal-create { 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            color: white; 
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        .modal-create:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(102, 126, 234, 0.6);
+        }
+        .modal-cancel { 
+            background: #2a2a2a; 
+            color: white; 
+            border: 1px solid #333333;
+        }
+        .modal-cancel:hover { background: #3a3a3a; }
         #videoStatus {
             margin-top: 15px;
             padding: 10px;
-            border-radius: 5px;
+            border-radius: 8px;
             display: none;
         }
-        #videoStatus.success { background: #d4edda; color: #155724; }
-        #videoStatus.error { background: #f8d7da; color: #721c24; }
-        #videoStatus.info { background: #d1ecf1; color: #0c5460; }
+        #videoStatus.success { background: #1a3a1a; color: #4ade80; border: 1px solid #2a4a2a; }
+        #videoStatus.error { background: #3a1a1a; color: #f87171; border: 1px solid #4a2a2a; }
+        #videoStatus.info { background: #1a2a3a; color: #60a5fa; border: 1px solid #2a3a4a; }
         
         /* Video player modal */
         #videoPlayerModal {
@@ -643,12 +724,14 @@ func startHTTPServer(config *Config) error {
             position: absolute;
             top: 15px;
             right: 15px;
-            background: rgba(0,0,0,0.7);
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             padding: 5px 10px;
-            border-radius: 3px;
+            border-radius: 6px;
             font-size: 12px;
             z-index: 5;
+            font-weight: 500;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
         }
         .gallery-item.video-item img {
             opacity: 0.9;
@@ -671,6 +754,7 @@ func startHTTPServer(config *Config) error {
     <h1>📱 {{.PhoneName}}</h1>
     <div class="info-bar">
         <p class="count">Total: {{.TotalItems}} | Page {{.CurrentPage}} of {{.TotalPages}}</p>
+        <button class="select-all-btn" onclick="selectAllOnPage()">✓ Select All on Page</button>
         <div class="pagination">
             {{if gt .CurrentPage 1}}
                 <a href="?page=1">« First</a>
@@ -822,6 +906,16 @@ func startHTTPServer(config *Config) error {
             });
             document.querySelectorAll('.gallery-item').forEach(item => {
                 item.classList.remove('selected');
+            });
+            updateSelectionBar();
+        }
+
+        function selectAllOnPage() {
+            document.querySelectorAll('.checkbox').forEach(cb => {
+                const filename = cb.dataset.filename;
+                cb.checked = true;
+                selectedPhotos.add(filename);
+                cb.closest('.gallery-item').classList.add('selected');
             });
             updateSelectionBar();
         }
