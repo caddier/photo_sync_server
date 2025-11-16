@@ -373,7 +373,7 @@ func startHTTPServer(config *Config) error {
 		sort.Strings(thumbFiles)
 
 		// Pagination logic
-		const itemsPerPage = 24
+		const itemsPerPage = 33
 		totalItems := len(thumbFiles)
 		totalPages := (totalItems + itemsPerPage - 1) / itemsPerPage
 		if totalPages < 1 {
@@ -504,9 +504,9 @@ func startHTTPServer(config *Config) error {
             border: 3px solid #4CAF50;
         }
         .gallery-item .checkbox {
-            position: absolute;
-            top: 15px;
-            left: 15px;
+            position: relative;
+            display: block;
+            margin: 5px auto 0 auto;
             width: 24px;
             height: 24px;
             cursor: pointer;
@@ -710,11 +710,11 @@ func startHTTPServer(config *Config) error {
         </div>
         {{else}}
 		<div class="gallery-item" data-filename="{{.}}">
-            <input type="checkbox" class="checkbox" data-filename="{{.}}">
 			<a href="#" onclick="viewPhoto('{{$.PhoneName}}', '{{.}}'); return false;">
 				<img src="/thumb/{{$.PhoneName}}/{{.}}" alt="{{.}}" />
 			</a>
             <div class="filename">{{.}}</div>
+            <input type="checkbox" class="checkbox" data-filename="{{.}}">
         </div>
         {{end}}
         {{end}}
