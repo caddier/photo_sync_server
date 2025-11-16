@@ -76,15 +76,21 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 					// JPEG files start with FF D8 FF
 					if header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF {
 						isActuallyJPEG = true
-						log.Printf("File %s has .heic extension but is actually a JPEG, no conversion needed", photoPath)
+						log.Printf("File %s has .heic extension but is actually a JPEG, copying to temp folder", photoPath)
 					}
 				}
 				f.Close()
 			}
 
 			if isActuallyJPEG {
-				// Just use it directly as JPEG
-				processedPaths = append(processedPaths, photoPath)
+				// Copy the JPEG file to temp directory
+				jpegPath := filepath.Join(tempDir, fmt.Sprintf("copied_%d.jpg", i))
+				if err := copyFile(photoPath, jpegPath); err != nil {
+					log.Printf("Warning: Failed to copy JPEG file %s: %v", photoPath, err)
+					continue
+				}
+				processedPaths = append(processedPaths, jpegPath)
+				log.Printf("Copied misnamed JPEG to temp: %s -> %s", photoPath, jpegPath)
 			} else {
 				// It's a real HEIC file - convert to JPEG
 				jpegPath := filepath.Join(tempDir, fmt.Sprintf("converted_%d.jpg", i))
@@ -100,8 +106,13 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 				log.Printf("Converted real HEIC to JPEG for video: %s -> %s", photoPath, jpegPath)
 			}
 		} else {
-			// Use original file if it's already JPEG/PNG
-			processedPaths = append(processedPaths, photoPath)
+			// Copy original file to temp directory for consistency
+			tempPath := filepath.Join(tempDir, fmt.Sprintf("photo_%d%s", i, ext))
+			if err := copyFile(photoPath, tempPath); err != nil {
+				log.Printf("Warning: Failed to copy file %s: %v", photoPath, err)
+				continue
+			}
+			processedPaths = append(processedPaths, tempPath)
 		}
 	}
 
@@ -271,13 +282,26 @@ func startHTTPServer(config *Config) error {
 			return
 		}
 
+		// Define preset folders that contain files, not photos
+		presetFolders := map[string]bool{
+			"music": true,
+			"data":  true,
+		}
+
 		var phoneDirs []string
+		var fileFolders []string
 		for _, e := range entries {
 			if e.IsDir() {
-				phoneDirs = append(phoneDirs, e.Name())
+				dirName := e.Name()
+				if presetFolders[dirName] {
+					fileFolders = append(fileFolders, dirName)
+				} else {
+					phoneDirs = append(phoneDirs, dirName)
+				}
 			}
 		}
 		sort.Strings(phoneDirs)
+		sort.Strings(fileFolders)
 
 		tmpl := `<!DOCTYPE html>
 <html>
@@ -285,9 +309,10 @@ func startHTTPServer(config *Config) error {
     <title>Photo Sync Server - Phone Directories</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; margin: 0; padding: 20px; background: #000000; color: #ffffff; }
-        h1 { color: #ffffff; font-weight: 300; letter-spacing: 1px; }
-        .phone-list { list-style: none; padding: 0; max-width: 600px; }
-        .phone-list li { margin: 15px 0; }
+        h1, h2 { color: #ffffff; font-weight: 300; letter-spacing: 1px; }
+        h2 { font-size: 20px; margin-top: 40px; margin-bottom: 10px; color: #aaaaaa; }
+        .phone-list, .file-list { list-style: none; padding: 0; max-width: 600px; }
+        .phone-list li, .file-list li { margin: 15px 0; }
         .phone-list a { 
             display: block; 
             padding: 20px; 
@@ -306,11 +331,32 @@ func startHTTPServer(config *Config) error {
             border-color: #667eea;
             box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
         }
+        .file-list a {
+            display: block; 
+            padding: 15px 20px; 
+            background: linear-gradient(135deg, #0d1a2d 0%, #1a2d45 100%); 
+            text-decoration: none; 
+            color: #88aaff; 
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+            transition: all 0.3s ease;
+            border: 1px solid #1a3a5a;
+            font-size: 14px;
+        }
+        .file-list a:hover {
+            transform: translateX(8px); 
+            background: linear-gradient(135deg, #1a2d45 0%, #2a3d55 100%); 
+            border-color: #4477cc;
+            box-shadow: 0 4px 16px rgba(68, 119, 204, 0.3);
+            color: #aaccff;
+        }
     </style>
 </head>
 <body>
-    <h1>Photo Sync Server - Phone Directories</h1>
+    <h1>Photo Sync Server</h1>
+    
     {{if .PhoneDirs}}
+    <h2>📱 Phone Directories</h2>
     <ul class="phone-list">
         {{range .PhoneDirs}}
         <li><a href="/phone/{{.}}">📱 {{.}}</a></li>
@@ -319,13 +365,26 @@ func startHTTPServer(config *Config) error {
     {{else}}
     <p>No phone directories found.</p>
     {{end}}
+
+    {{if .FileFolders}}
+    <h2>📁 File Folders</h2>
+    <ul class="file-list">
+        {{range .FileFolders}}
+        <li><a href="/files/{{.}}">📁 {{.}}</a></li>
+        {{end}}
+    </ul>
+    {{end}}
 </body>
 </html>`
 
 		t := template.Must(template.New("home").Parse(tmpl))
 		data := struct {
-			PhoneDirs []string
-		}{PhoneDirs: phoneDirs}
+			PhoneDirs   []string
+			FileFolders []string
+		}{
+			PhoneDirs:   phoneDirs,
+			FileFolders: fileFolders,
+		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		t.Execute(w, data)
@@ -1600,6 +1659,200 @@ func startHTTPServer(config *Config) error {
 			"message":  "Video created successfully",
 		})
 	}).Methods("POST")
+
+	// File folder viewer - list files in preset folders (music, data, etc.)
+	router.HandleFunc("/files/{folderName}", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		folderName := vars["folderName"]
+
+		baseDir := config.ReceiveDir
+		if baseDir == "" {
+			baseDir = "received"
+		}
+
+		folderPath := filepath.Join(baseDir, folderName)
+
+		// Security check - ensure folder exists and is a directory
+		info, err := os.Stat(folderPath)
+		if err != nil || !info.IsDir() {
+			http.Error(w, "Folder not found", http.StatusNotFound)
+			return
+		}
+
+		// Read files in the folder
+		entries, err := os.ReadDir(folderPath)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error reading folder: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		type FileInfo struct {
+			Name      string
+			Size      int64
+			IsDir     bool
+			Extension string
+		}
+
+		var files []FileInfo
+		for _, e := range entries {
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+
+			ext := strings.ToLower(filepath.Ext(e.Name()))
+			files = append(files, FileInfo{
+				Name:      e.Name(),
+				Size:      info.Size(),
+				IsDir:     e.IsDir(),
+				Extension: ext,
+			})
+		}
+
+		// Sort: directories first, then by name
+		sort.Slice(files, func(i, j int) bool {
+			if files[i].IsDir != files[j].IsDir {
+				return files[i].IsDir
+			}
+			return files[i].Name < files[j].Name
+		})
+
+		tmpl := `<!DOCTYPE html>
+<html>
+<head>
+    <title>{{.FolderName}} - File Browser</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; margin: 0; padding: 20px; background: #000000; color: #ffffff; }
+        h1 { color: #ffffff; font-weight: 300; letter-spacing: 1px; }
+        .back-link { 
+            display: inline-block; 
+            margin-bottom: 20px; 
+            color: #88aaff; 
+            text-decoration: none; 
+            font-size: 14px;
+        }
+        .back-link:hover { color: #aaccff; text-decoration: underline; }
+        .file-list { list-style: none; padding: 0; max-width: 800px; }
+        .file-list li { margin: 10px 0; }
+        .file-item { 
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px; 
+            background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%); 
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+            border: 1px solid #2a2a2a;
+            transition: all 0.3s ease;
+        }
+        .file-item:hover {
+            background: linear-gradient(135deg, #2a2a2a 0%, #3a3a3a 100%); 
+            border-color: #667eea;
+            transform: translateX(5px);
+        }
+        .file-name { 
+            color: #ffffff; 
+            text-decoration: none;
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+        }
+        .file-name:hover { color: #aaccff; }
+        .file-icon { margin-right: 10px; font-size: 18px; }
+        .file-size { color: #888888; font-size: 12px; margin-left: 20px; }
+        .download-btn {
+            padding: 6px 12px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 12px;
+            transition: all 0.3s ease;
+        }
+        .download-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.5);
+        }
+        .folder-item .file-name { color: #88aaff; }
+        .empty-message { color: #888888; padding: 20px; }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-link">← Back to Home</a>
+    <h1>📁 {{.FolderName}}</h1>
+    
+    {{if .Files}}
+    <ul class="file-list">
+        {{range .Files}}
+        <li>
+            <div class="file-item {{if .IsDir}}folder-item{{end}}">
+                <span class="file-name">
+                    <span class="file-icon">{{if .IsDir}}📁{{else}}📄{{end}}</span>
+                    {{.Name}}
+                    {{if not .IsDir}}
+                    <span class="file-size">({{.Size}} bytes)</span>
+                    {{end}}
+                </span>
+                {{if not .IsDir}}
+                <a href="/download/{{$.FolderName}}/{{.Name}}" class="download-btn" download>Download</a>
+                {{end}}
+            </div>
+        </li>
+        {{end}}
+    </ul>
+    {{else}}
+    <p class="empty-message">This folder is empty.</p>
+    {{end}}
+</body>
+</html>`
+
+		t := template.Must(template.New("files").Parse(tmpl))
+		data := struct {
+			FolderName string
+			Files      []FileInfo
+		}{
+			FolderName: folderName,
+			Files:      files,
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		t.Execute(w, data)
+	}).Methods("GET")
+
+	// Download handler for files in preset folders
+	router.HandleFunc("/download/{folderName}/{fileName}", func(w http.ResponseWriter, r *http.Request) {
+		vars := mux.Vars(r)
+		folderName := vars["folderName"]
+		fileName := vars["fileName"]
+
+		baseDir := config.ReceiveDir
+		if baseDir == "" {
+			baseDir = "received"
+		}
+
+		filePath := filepath.Join(baseDir, folderName, fileName)
+
+		// Security check - ensure path doesn't escape base directory
+		absBase, _ := filepath.Abs(baseDir)
+		absFile, _ := filepath.Abs(filePath)
+		if !strings.HasPrefix(absFile, absBase) {
+			http.Error(w, "Access denied", http.StatusForbidden)
+			return
+		}
+
+		// Check if file exists and is not a directory
+		info, err := os.Stat(filePath)
+		if err != nil || info.IsDir() {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+
+		// Serve the file
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
+		http.ServeFile(w, r, filePath)
+	}).Methods("GET")
 
 	port := config.HttpPort
 	if port == "" {
