@@ -128,7 +128,7 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 	outputPath := filepath.Join(phoneDir, videoName+".mp4")
 	markerPath := filepath.Join(phoneDir, "."+videoName+".created")
 
-	// Create ffmpeg command
+	// Create ffmpeg command with transition effects
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -173,7 +173,7 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 			"-i", concatFile,
 			"-stream_loop", "-1", // Loop the audio
 			"-i", bgmPath,
-			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1", scale, scale),
+			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1,fade=t=in:st=0:d=0.5,fade=t=out:st=%.2f:d=0.5", scale, scale, frameDuration*float64(len(processedPaths))-0.5),
 			"-c:v", "libx264",
 			"-preset", "medium",
 			"-crf", "23",
@@ -184,14 +184,14 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 			"-y",
 			outputPath,
 		}
-		log.Printf("Creating video with background music from %s", bgmPath)
+		log.Printf("Creating video with fade transitions and background music from %s", bgmPath)
 	} else {
-		// Without background music (original code)
+		// Without background music
 		args = []string{
 			"-f", "concat",
 			"-safe", "0",
 			"-i", concatFile,
-			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1", scale, scale),
+			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1,fade=t=in:st=0:d=0.5,fade=t=out:st=%.2f:d=0.5", scale, scale, frameDuration*float64(len(processedPaths))-0.5),
 			"-c:v", "libx264",
 			"-preset", "medium",
 			"-crf", "23",
@@ -199,7 +199,7 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 			"-y",
 			outputPath,
 		}
-		log.Printf("Creating video without background music (no music files available)")
+		log.Printf("Creating video with fade transitions (no background music)")
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -380,7 +380,7 @@ func startHTTPServer(config *Config) error {
 		sort.Strings(thumbFiles)
 
 		// Pagination logic
-		const itemsPerPage = 44
+		const itemsPerPage = 80
 		totalItems := len(thumbFiles)
 		totalPages := (totalItems + itemsPerPage - 1) / itemsPerPage
 		if totalPages < 1 {
