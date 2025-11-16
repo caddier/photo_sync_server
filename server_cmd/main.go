@@ -70,8 +70,6 @@ type ChunkedVideoInfo struct {
 // Global state for thumbnail generation control
 var (
 	thumbnailGenerationMutex sync.Mutex
-	thumbnailCancelFunc      context.CancelFunc
-	thumbnailCancelMutex     sync.Mutex
 )
 
 type Config struct {
@@ -201,8 +199,20 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 	// Track chunked video transfers for this connection
 	chunkedVideos := make(map[string]*ChunkedVideoInfo)
 
+	// Per-connection thumbnail generation cancel function
+	var thumbnailCancel context.CancelFunc
+	var thumbnailMutex sync.Mutex
+
 	defer func() {
 		log.Printf("Closing connection from %s\n", conn.RemoteAddr().String())
+
+		// Cancel any ongoing thumbnail generation for this connection
+		thumbnailMutex.Lock()
+		if thumbnailCancel != nil {
+			log.Printf("Cancelling thumbnail generation for connection from %s", conn.RemoteAddr().String())
+			thumbnailCancel()
+		}
+		thumbnailMutex.Unlock()
 
 		// Clean up any incomplete chunked video transfers
 		for id, info := range chunkedVideos {
@@ -223,11 +233,7 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 			log.Printf("Connection closed, triggering thumbnail generation for %s\n", recvDir)
 			go func(dir string) {
 				ctx, cancel := context.WithCancel(context.Background())
-
-				// Store cancel function so it can be called when new sync starts
-				thumbnailCancelMutex.Lock()
-				thumbnailCancelFunc = cancel
-				thumbnailCancelMutex.Unlock()
+				defer cancel()
 
 				if err := generateThumbnails(ctx, dir); err != nil {
 					if err == context.Canceled {
@@ -238,11 +244,6 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 				} else {
 					log.Printf("Thumbnail generation completed for %s\n", dir)
 				}
-
-				// Clear cancel function after completion
-				thumbnailCancelMutex.Lock()
-				thumbnailCancelFunc = nil
-				thumbnailCancelMutex.Unlock()
 			}(recvDir)
 		}
 	}()
@@ -576,13 +577,17 @@ func handleTCPConnection(conn net.Conn, config *Config) {
 		}
 
 		if msgType == msgTypeSetPhoneName {
-			// Cancel any running thumbnail generation when new sync starts
-			thumbnailCancelMutex.Lock()
-			if thumbnailCancelFunc != nil {
+			// Cancel any running thumbnail generation for this connection when new sync starts
+			thumbnailMutex.Lock()
+			if thumbnailCancel != nil {
 				log.Printf("Cancelling ongoing thumbnail generation (new sync starting)")
-				thumbnailCancelFunc()
+				thumbnailCancel()
 			}
-			thumbnailCancelMutex.Unlock()
+
+			// Create new context for potential thumbnail generation during this sync
+			_, cancel := context.WithCancel(context.Background())
+			thumbnailCancel = cancel
+			thumbnailMutex.Unlock()
 
 			//client phone name is in this request,
 			phoneName := string(payload)
@@ -776,7 +781,7 @@ func startUDPServer(config *Config) error {
 	}
 }
 
-// convertHEICToImage converts a HEIC file to JPEG using ImageMagick and returns the decoded image
+// convertHEICToImage converts a HEIC file to JPEG using heif-convert and returns the decoded image
 func convertHEICToImage(heicPath string) (image.Image, string, error) {
 	// Create a temporary JPEG file
 	tmpFile, err := os.CreateTemp("", "heic-convert-*.jpg")
@@ -787,24 +792,13 @@ func convertHEICToImage(heicPath string) (image.Image, string, error) {
 	tmpFile.Close()
 	defer os.Remove(tmpPath)
 
-	var cmd *exec.Cmd
-	var conversionMethod string
+	// Use /usr/local/bin/heif-convert directly
+	heifConvertPath := "/usr/local/bin/heif-convert"
+	cmd := exec.Command(heifConvertPath, heicPath, tmpPath)
 
-	// Try ImageMagick first (best HEIC support)
-	if _, err := exec.LookPath("magick"); err == nil {
-		cmd = exec.Command("magick", "convert", heicPath, tmpPath)
-		conversionMethod = "ImageMagick"
-	} else if _, err := exec.LookPath("convert"); err == nil {
-		// Try older ImageMagick command
-		cmd = exec.Command("convert", heicPath, tmpPath)
-		conversionMethod = "ImageMagick (convert)"
-	} else {
-		return nil, "", fmt.Errorf("ImageMagick not found. Please install ImageMagick for HEIC support")
-	}
-
-	log.Printf("Converting HEIC using %s: %s", conversionMethod, heicPath)
+	log.Printf("Converting HEIC using heif-convert: %s", heicPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return nil, "", fmt.Errorf("%s conversion failed: %w, output: %s", conversionMethod, err, string(output))
+		return nil, "", fmt.Errorf("heif-convert failed: %w, output: %s", err, string(output))
 	}
 
 	// Open and decode the converted JPEG
@@ -819,7 +813,7 @@ func convertHEICToImage(heicPath string) (image.Image, string, error) {
 		return nil, "", fmt.Errorf("decode converted image: %w", err)
 	}
 
-	log.Printf("Successfully converted HEIC to %s using %s", format, conversionMethod)
+	log.Printf("Successfully converted HEIC to %s using heif-convert", format)
 	return img, format, nil
 } // generateThumbnails scans the phone directory and writes thumbnails into a subdirectory named "thumbnails".
 // For photos (jpg/jpeg/png): thumbnails keep the original extension and are named with prefix "tbn-".
@@ -1152,6 +1146,115 @@ func countPhotosInDir(dir string) (int, error) {
 	return count, nil
 }
 
+// cleanOrphanedThumbnails scans all phone directories and removes thumbnails whose original files don't exist
+func cleanOrphanedThumbnails(baseDir string) {
+	if baseDir == "" {
+		baseDir = "received"
+	}
+
+	// Get all phone directories
+	phoneDirs, err := os.ReadDir(baseDir)
+	if err != nil {
+		log.Printf("Error reading base directory for cleanup: %v", err)
+		return
+	}
+
+	totalCleaned := 0
+	for _, phoneEntry := range phoneDirs {
+		if !phoneEntry.IsDir() {
+			continue
+		}
+
+		phoneName := phoneEntry.Name()
+		phoneDir := filepath.Join(baseDir, phoneName)
+		thumbDir := filepath.Join(phoneDir, "thumbnails")
+
+		// Check if thumbnails directory exists
+		if _, err := os.Stat(thumbDir); os.IsNotExist(err) {
+			continue
+		}
+
+		// Read all thumbnails
+		thumbEntries, err := os.ReadDir(thumbDir)
+		if err != nil {
+			log.Printf("Error reading thumbnails directory %s: %v", thumbDir, err)
+			continue
+		}
+
+		for _, thumbEntry := range thumbEntries {
+			if thumbEntry.IsDir() {
+				continue
+			}
+
+			thumbName := thumbEntry.Name()
+			ext := strings.ToLower(filepath.Ext(thumbName))
+
+			// Only check image thumbnails (videos are in parent directory)
+			if ext != ".jpg" && ext != ".jpeg" && ext != ".png" {
+				continue
+			}
+
+			// Extract base name from thumbnail
+			base := strings.TrimSuffix(thumbName, ext)
+			if strings.HasPrefix(strings.ToLower(base), "tbn-") {
+				base = base[4:]
+			}
+
+			// Check if original file exists with any valid extension
+			imageExts := []string{".jpg", ".jpeg", ".png", ".heic"}
+			videoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+			allExts := append(imageExts, videoExts...)
+
+			foundOriginal := false
+			for _, origExt := range allExts {
+				origPath := filepath.Join(phoneDir, base+origExt)
+				if _, err := os.Stat(origPath); err == nil {
+					foundOriginal = true
+					break
+				}
+			}
+
+			// If original doesn't exist, delete the orphaned thumbnail
+			if !foundOriginal {
+				orphanPath := filepath.Join(thumbDir, thumbName)
+				if err := os.Remove(orphanPath); err == nil {
+					totalCleaned++
+					log.Printf("Deleted orphaned thumbnail: %s/%s", phoneName, thumbName)
+				} else {
+					log.Printf("Error removing orphaned thumbnail %s: %v", orphanPath, err)
+				}
+			}
+		}
+	}
+
+	if totalCleaned > 0 {
+		log.Printf("Orphaned thumbnail cleanup completed: removed %d files", totalCleaned)
+	} else {
+		log.Printf("Orphaned thumbnail cleanup completed: no orphaned files found")
+	}
+}
+
+// startOrphanedThumbnailCleaner starts a periodic cleanup task
+func startOrphanedThumbnailCleaner(config *Config, interval time.Duration) {
+	baseDir := config.ReceiveDir
+	if baseDir == "" {
+		baseDir = "received"
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	log.Printf("Started orphaned thumbnail cleaner (interval: %v)", interval)
+
+	// Run immediately on startup
+	cleanOrphanedThumbnails(baseDir)
+
+	// Then run periodically
+	for range ticker.C {
+		cleanOrphanedThumbnails(baseDir)
+	}
+}
+
 func main() {
 	// Parse command-line flags
 	showVersion := flag.Bool("v", false, "show version and exit")
@@ -1174,7 +1277,13 @@ func main() {
 	log.Printf("Server Name: %s\n", config.ServerName)
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4) // Increased to 4 for the cleanup task
+
+	// Start orphaned thumbnail cleaner (runs every 5 minutes)
+	go func() {
+		defer wg.Done()
+		startOrphanedThumbnailCleaner(config, 5*time.Minute)
+	}()
 
 	// Start TCP server
 	go func() {

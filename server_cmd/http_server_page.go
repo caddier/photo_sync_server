@@ -22,15 +22,29 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 	// Resolve thumbnail names to original photo paths
 	var photoPaths []string
 	for _, thumbName := range thumbNames {
-		// Remove tbn- prefix to get original filename
-		origName := strings.TrimPrefix(thumbName, "tbn-")
+		// Remove tbn- prefix and extension to get base name
+		thumbExt := strings.ToLower(filepath.Ext(thumbName))
+		base := strings.TrimSuffix(thumbName, thumbExt)
+		if strings.HasPrefix(strings.ToLower(base), "tbn-") {
+			base = base[4:]
+		}
 
-		// Try to find the original file in the phone directory
-		origPath := filepath.Join(phoneDir, origName)
-		if _, err := os.Stat(origPath); err == nil {
-			photoPaths = append(photoPaths, origPath)
-		} else {
-			log.Printf("Warning: original file not found for thumbnail %s", thumbName)
+		// Try all possible image extensions since thumbnail extension
+		// may differ from original (e.g., HEIC originals have JPG thumbnails)
+		imageExts := []string{".jpg", ".jpeg", ".png", ".heic"}
+
+		foundOriginal := false
+		for _, ext := range imageExts {
+			origPath := filepath.Join(phoneDir, base+ext)
+			if _, err := os.Stat(origPath); err == nil {
+				photoPaths = append(photoPaths, origPath)
+				foundOriginal = true
+				break
+			}
+		}
+
+		if !foundOriginal {
+			log.Printf("Warning: original file not found for thumbnail %s (base: %s)", thumbName, base)
 		}
 	}
 
@@ -45,6 +59,34 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 	}
 	defer os.RemoveAll(tempDir)
 
+	// Convert HEIC files to JPEG in temp directory
+	var processedPaths []string
+	for i, photoPath := range photoPaths {
+		ext := strings.ToLower(filepath.Ext(photoPath))
+
+		// If it's a HEIC file, convert to JPEG
+		if ext == ".heic" {
+			jpegPath := filepath.Join(tempDir, fmt.Sprintf("converted_%d.jpg", i))
+
+			// Convert using heif-convert
+			cmd := exec.Command("/usr/local/bin/heif-convert", photoPath, jpegPath)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("Warning: HEIC conversion failed for %s: %v, output: %s", photoPath, err, string(output))
+				continue
+			}
+
+			processedPaths = append(processedPaths, jpegPath)
+			log.Printf("Converted HEIC to JPEG for video: %s -> %s", photoPath, jpegPath)
+		} else {
+			// Use original file if it's already JPEG/PNG
+			processedPaths = append(processedPaths, photoPath)
+		}
+	}
+
+	if len(processedPaths) == 0 {
+		return fmt.Errorf("no valid photos after conversion")
+	}
+
 	// Create concat file for ffmpeg
 	concatFile := filepath.Join(tempDir, "concat.txt")
 	f, err := os.Create(concatFile)
@@ -52,7 +94,7 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 		return fmt.Errorf("failed to create concat file: %v", err)
 	}
 
-	for _, photoPath := range photoPaths {
+	for _, photoPath := range processedPaths {
 		// Write each photo to concat file with duration
 		absPath, _ := filepath.Abs(photoPath)
 		// Escape single quotes in path
@@ -61,8 +103,8 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 		fmt.Fprintf(f, "duration %.2f\n", frameDuration)
 	}
 	// Add last image again (ffmpeg concat demuxer requirement)
-	if len(photoPaths) > 0 {
-		absPath, _ := filepath.Abs(photoPaths[len(photoPaths)-1])
+	if len(processedPaths) > 0 {
+		absPath, _ := filepath.Abs(processedPaths[len(processedPaths)-1])
 		escapedPath := strings.ReplaceAll(absPath, "'", "'\\''")
 		fmt.Fprintf(f, "file '%s'\n", escapedPath)
 	}
@@ -222,7 +264,38 @@ func startHTTPServer(config *Config) error {
 			if !e.IsDir() {
 				ext := strings.ToLower(filepath.Ext(e.Name()))
 				if ext == ".jpg" || ext == ".jpeg" || ext == ".png" {
-					thumbFiles = append(thumbFiles, e.Name())
+					thumbName := e.Name()
+
+					// Verify that the original file exists before adding thumbnail to list
+					thumbExt := strings.ToLower(filepath.Ext(thumbName))
+					base := strings.TrimSuffix(thumbName, thumbExt)
+					if strings.HasPrefix(strings.ToLower(base), "tbn-") {
+						base = base[4:]
+					}
+
+					// Check if original file exists with any valid extension
+					imageExts := []string{".jpg", ".jpeg", ".png", ".heic"}
+					videoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+					allExts := append(imageExts, videoExts...)
+
+					foundOriginal := false
+					for _, origExt := range allExts {
+						origPath := filepath.Join(phoneDir, base+origExt)
+						if _, err := os.Stat(origPath); err == nil {
+							foundOriginal = true
+							break
+						}
+					}
+
+					// Only add thumbnail if original file exists
+					if foundOriginal {
+						thumbFiles = append(thumbFiles, thumbName)
+					} else {
+						// Optional: delete orphaned thumbnail
+						orphanPath := filepath.Join(thumbDir, thumbName)
+						os.Remove(orphanPath)
+						log.Printf("Removed orphaned thumbnail: %s (original not found)", thumbName)
+					}
 				}
 			}
 		}
@@ -943,6 +1016,8 @@ func startHTTPServer(config *Config) error {
 			base = base[4:]
 		}
 
+		log.Printf("Looking for original: thumbName=%s, base=%s, phoneDir=%s", thumbName, base, phoneDir)
+
 		// Try all possible image and video extensions since thumbnail extension
 		// may differ from original (e.g., HEIC originals have JPG thumbnails)
 		imageExts := []string{".jpg", ".jpeg", ".png", ".heic"}
@@ -951,8 +1026,38 @@ func startHTTPServer(config *Config) error {
 		// First try images
 		for _, ext := range imageExts {
 			orig := filepath.Join(phoneDir, base+ext)
-			log.Printf("Checking for original image: %s", orig)
 			if _, err := os.Stat(orig); err == nil {
+				log.Printf("Found original image: %s", orig)
+
+				// If it's a HEIC file, convert to JPEG on-the-fly for browser compatibility
+				if strings.ToLower(ext) == ".heic" {
+					log.Printf("Converting HEIC to JPEG for browser: %s", orig)
+
+					// Create temporary JPEG file
+					tmpFile, err := os.CreateTemp("", "heic-web-*.jpg")
+					if err != nil {
+						log.Printf("Error creating temp file for HEIC conversion: %v", err)
+						http.Error(w, "Error processing image", http.StatusInternalServerError)
+						return
+					}
+					tmpPath := tmpFile.Name()
+					tmpFile.Close()
+					defer os.Remove(tmpPath)
+
+					// Convert using heif-convert
+					cmd := exec.Command("/usr/local/bin/heif-convert", orig, tmpPath)
+					if output, err := cmd.CombinedOutput(); err != nil {
+						log.Printf("HEIC conversion failed: %v, output: %s", err, string(output))
+						http.Error(w, "Error converting image", http.StatusInternalServerError)
+						return
+					}
+
+					// Serve the converted JPEG
+					w.Header().Set("Content-Type", "image/jpeg")
+					http.ServeFile(w, r, tmpPath)
+					return
+				}
+
 				http.ServeFile(w, r, orig)
 				return
 			}
@@ -961,14 +1066,14 @@ func startHTTPServer(config *Config) error {
 		// Then try videos (common formats)
 		for _, ext := range videoExts {
 			orig := filepath.Join(phoneDir, base+ext)
-			log.Printf("Checking for original video: %s", orig)
 			if _, err := os.Stat(orig); err == nil {
+				log.Printf("Found original video: %s", orig)
 				http.ServeFile(w, r, orig)
 				return
 			}
 		}
 
-		log.Printf("File not found for thumbName=%s, base=%s in phoneDir=%s", thumbName, base, phoneDir)
+		log.Printf("Original file not found: thumbName=%s, base=%s", thumbName, base)
 		http.NotFound(w, r)
 	}).Methods("GET")
 

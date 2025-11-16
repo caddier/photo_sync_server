@@ -1,5 +1,5 @@
 {
-    "server_name": "myPhotoServer",
-    "receive_dir" : "photos",
+    "server_name": "PhotoServer",
+    "receive_dir" : "/data/",
     "http_port": "8080"
 }
