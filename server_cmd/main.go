@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -783,6 +784,25 @@ func startUDPServer(config *Config) error {
 
 // convertHEICToImage converts a HEIC file to JPEG using heif-convert and returns the decoded image
 func convertHEICToImage(heicPath string) (image.Image, string, error) {
+	// First, check if this "HEIC" file is actually a JPEG by trying to decode it directly
+	f, err := os.Open(heicPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("open file: %w", err)
+	}
+
+	// Try to decode as standard image (JPEG/PNG/etc)
+	img, format, err := image.Decode(f)
+	f.Close()
+
+	if err == nil {
+		// Successfully decoded - it's actually a JPEG or other standard image format
+		log.Printf("File %s has .heic extension but is actually %s format, no conversion needed", heicPath, format)
+		return img, format, nil
+	}
+
+	// Failed to decode directly, so it's a real HEIC file - convert it
+	log.Printf("File %s is a real HEIC file, converting using heif-convert", heicPath)
+
 	// Create a temporary JPEG file
 	tmpFile, err := os.CreateTemp("", "heic-convert-*.jpg")
 	if err != nil {
@@ -802,13 +822,13 @@ func convertHEICToImage(heicPath string) (image.Image, string, error) {
 	}
 
 	// Open and decode the converted JPEG
-	f, err := os.Open(tmpPath)
+	f2, err := os.Open(tmpPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("open converted image: %w", err)
 	}
-	defer f.Close()
+	defer f2.Close()
 
-	img, format, err := image.Decode(f)
+	img, format, err = image.Decode(f2)
 	if err != nil {
 		return nil, "", fmt.Errorf("decode converted image: %w", err)
 	}
@@ -869,37 +889,48 @@ func generateThumbnails(ctx context.Context, parentDir string) error {
 				continue
 			}
 
-			// Check if file is actually HEIC (even if extension says .jpg)
-			isHEIC := false
-			if f, err := os.Open(srcPath); err == nil {
-				header := make([]byte, 12)
-				n, _ := io.ReadFull(f, header)
-				f.Close()
-				// HEIC files start with: ftyp (at offset 4)
-				if n >= 12 && string(header[4:8]) == "ftyp" {
-					heicType := string(header[8:12])
-					log.Printf("File %s has ftyp signature, type: %q (hex: %x)", name, heicType, header)
-					if heicType == "heic" || heicType == "heix" || heicType == "mif1" {
-						isHEIC = true
-					}
-				} else if n > 0 {
-					log.Printf("File %s header (first %d bytes): %x", name, n, header[:n])
-				}
-			}
-
 			var img image.Image
 			var format string
 			var err error
 
-			if isHEIC {
-				// Convert HEIC to JPEG using ffmpeg, then decode
-				img, format, err = convertHEICToImage(srcPath)
-				if err != nil {
-					log.Printf("failed to convert HEIC %s: %v", srcPath, err)
-					continue
+			// For .heic files, check if they're actually JPEG
+			if ext == ".heic" {
+				// Check file signature (FF D8 FF = JPEG magic bytes)
+				isActuallyJPEG := false
+				if f, err := os.Open(srcPath); err == nil {
+					header := make([]byte, 3)
+					if n, _ := io.ReadFull(f, header); n == 3 {
+						if header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF {
+							isActuallyJPEG = true
+							log.Printf("File %s has .heic extension but is actually a JPEG", name)
+						}
+					}
+					f.Close()
+				}
+
+				if isActuallyJPEG {
+					// It's actually a JPEG, decode directly
+					f, err := os.Open(srcPath)
+					if err != nil {
+						log.Printf("open source image failed %s: %v", srcPath, err)
+						continue
+					}
+					img, format, err = image.Decode(f)
+					f.Close()
+					if err != nil {
+						log.Printf("decode JPEG failed %s: %v", srcPath, err)
+						continue
+					}
+				} else {
+					// It's a real HEIC file, convert it
+					img, format, err = convertHEICToImage(srcPath)
+					if err != nil {
+						log.Printf("failed to convert HEIC %s: %v", srcPath, err)
+						continue
+					}
 				}
 			} else {
-				// Standard image decoding
+				// Standard image decoding for non-HEIC files
 				f, err := os.Open(srcPath)
 				if err != nil {
 					log.Printf("open source image failed %s: %v", srcPath, err)
@@ -953,7 +984,7 @@ func generateThumbnails(ctx context.Context, parentDir string) error {
 			}
 			// HEIC files are converted to JPEG, so encode as JPEG
 			// PNG files keep PNG format, all others (including HEIC) use JPEG
-			if ext == ".png" && !isHEIC {
+			if ext == ".png" {
 				if err := png.Encode(out, thumbImg); err != nil {
 					log.Printf("encode png failed %s: %v", thumbPath, err)
 				}
@@ -1147,6 +1178,7 @@ func countPhotosInDir(dir string) (int, error) {
 }
 
 // cleanOrphanedThumbnails scans all phone directories and removes thumbnails whose original files don't exist
+// Also detects and removes duplicate photos based on MD5 hash comparison
 func cleanOrphanedThumbnails(baseDir string) {
 	if baseDir == "" {
 		baseDir = "received"
@@ -1160,6 +1192,8 @@ func cleanOrphanedThumbnails(baseDir string) {
 	}
 
 	totalCleaned := 0
+	totalDuplicates := 0
+
 	for _, phoneEntry := range phoneDirs {
 		if !phoneEntry.IsDir() {
 			continue
@@ -1181,6 +1215,7 @@ func cleanOrphanedThumbnails(baseDir string) {
 			continue
 		}
 
+		// First pass: remove orphaned thumbnails
 		for _, thumbEntry := range thumbEntries {
 			if thumbEntry.IsDir() {
 				continue
@@ -1225,13 +1260,114 @@ func cleanOrphanedThumbnails(baseDir string) {
 				}
 			}
 		}
+
+		// Second pass: detect and remove duplicate photos based on MD5 hash
+		duplicates := findDuplicatePhotos(phoneDir)
+		for _, dupPath := range duplicates {
+			// Also delete the corresponding thumbnail
+			baseName := strings.TrimSuffix(filepath.Base(dupPath), filepath.Ext(dupPath))
+
+			// Find and delete thumbnail
+			thumbPattern := filepath.Join(thumbDir, "tbn-"+baseName+".*")
+			if matches, err := filepath.Glob(thumbPattern); err == nil {
+				for _, thumbPath := range matches {
+					if err := os.Remove(thumbPath); err == nil {
+						log.Printf("Deleted duplicate thumbnail: %s", thumbPath)
+					}
+				}
+			}
+
+			// Delete the duplicate original file
+			if err := os.Remove(dupPath); err == nil {
+				totalDuplicates++
+				log.Printf("Deleted duplicate photo: %s/%s", phoneName, filepath.Base(dupPath))
+			} else {
+				log.Printf("Error removing duplicate photo %s: %v", dupPath, err)
+			}
+		}
 	}
 
-	if totalCleaned > 0 {
-		log.Printf("Orphaned thumbnail cleanup completed: removed %d files", totalCleaned)
+	if totalCleaned > 0 || totalDuplicates > 0 {
+		log.Printf("Cleanup completed: removed %d orphaned thumbnails, %d duplicate photos", totalCleaned, totalDuplicates)
 	} else {
-		log.Printf("Orphaned thumbnail cleanup completed: no orphaned files found")
+		log.Printf("Cleanup completed: no orphaned or duplicate files found")
 	}
+}
+
+// findDuplicatePhotos scans a phone directory and returns paths of duplicate photos to delete
+// It keeps the first occurrence and marks subsequent duplicates for deletion
+func findDuplicatePhotos(phoneDir string) []string {
+	// Map of MD5 hash to file path (first occurrence)
+	hashToFile := make(map[string]string)
+	// List of duplicate files to delete
+	var duplicates []string
+
+	entries, err := os.ReadDir(phoneDir)
+	if err != nil {
+		log.Printf("Error reading phone directory for duplicate detection: %v", err)
+		return duplicates
+	}
+
+	imageExts := []string{".jpg", ".jpeg", ".png", ".heic"}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		fileName := entry.Name()
+		ext := strings.ToLower(filepath.Ext(fileName))
+
+		// Only check image files
+		isImage := false
+		for _, imgExt := range imageExts {
+			if ext == imgExt {
+				isImage = true
+				break
+			}
+		}
+
+		if !isImage {
+			continue
+		}
+
+		filePath := filepath.Join(phoneDir, fileName)
+
+		// Calculate MD5 hash
+		hash, err := calculateMD5(filePath)
+		if err != nil {
+			log.Printf("Error calculating MD5 for %s: %v", filePath, err)
+			continue
+		}
+
+		// Check if we've seen this hash before
+		if existingFile, exists := hashToFile[hash]; exists {
+			// This is a duplicate - mark for deletion
+			duplicates = append(duplicates, filePath)
+			log.Printf("Found duplicate: %s (same as %s, MD5: %s)", fileName, filepath.Base(existingFile), hash[:8])
+		} else {
+			// First occurrence - keep it
+			hashToFile[hash] = filePath
+		}
+	}
+
+	return duplicates
+}
+
+// calculateMD5 calculates the MD5 hash of a file
+func calculateMD5(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := md5.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 // startOrphanedThumbnailCleaner starts a periodic cleanup task

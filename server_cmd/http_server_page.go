@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -19,7 +20,7 @@ import (
 )
 
 // createVideoFromPhotos creates a video from selected photos using ffmpeg
-func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName string, frameDuration float64, quality string) error {
+func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName string, frameDuration float64, quality string, musicFile string) error {
 	// Resolve thumbnail names to original photo paths
 	var photoPaths []string
 	for _, thumbName := range thumbNames {
@@ -65,19 +66,39 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 	for i, photoPath := range photoPaths {
 		ext := strings.ToLower(filepath.Ext(photoPath))
 
-		// If it's a HEIC file, convert to JPEG
+		// If it's a HEIC file, check if it's really HEIC or just a misnamed JPEG
 		if ext == ".heic" {
-			jpegPath := filepath.Join(tempDir, fmt.Sprintf("converted_%d.jpg", i))
-
-			// Convert using heif-convert
-			cmd := exec.Command("/usr/local/bin/heif-convert", photoPath, jpegPath)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				log.Printf("Warning: HEIC conversion failed for %s: %v, output: %s", photoPath, err, string(output))
-				continue
+			// Try to detect if it's actually a JPEG by checking file signature
+			isActuallyJPEG := false
+			if f, err := os.Open(photoPath); err == nil {
+				header := make([]byte, 3)
+				if n, _ := io.ReadFull(f, header); n == 3 {
+					// JPEG files start with FF D8 FF
+					if header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF {
+						isActuallyJPEG = true
+						log.Printf("File %s has .heic extension but is actually a JPEG, no conversion needed", photoPath)
+					}
+				}
+				f.Close()
 			}
 
-			processedPaths = append(processedPaths, jpegPath)
-			log.Printf("Converted HEIC to JPEG for video: %s -> %s", photoPath, jpegPath)
+			if isActuallyJPEG {
+				// Just use it directly as JPEG
+				processedPaths = append(processedPaths, photoPath)
+			} else {
+				// It's a real HEIC file - convert to JPEG
+				jpegPath := filepath.Join(tempDir, fmt.Sprintf("converted_%d.jpg", i))
+
+				// Convert using heif-convert
+				cmd := exec.Command("/usr/local/bin/heif-convert", photoPath, jpegPath)
+				if output, err := cmd.CombinedOutput(); err != nil {
+					log.Printf("Warning: HEIC conversion failed for %s: %v, output: %s", photoPath, err, string(output))
+					continue
+				}
+
+				processedPaths = append(processedPaths, jpegPath)
+				log.Printf("Converted real HEIC to JPEG for video: %s -> %s", photoPath, jpegPath)
+			}
 		} else {
 			// Use original file if it's already JPEG/PNG
 			processedPaths = append(processedPaths, photoPath)
@@ -132,36 +153,50 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	// Select a random BGM file from /data/music
+	// Select BGM file from /data/music
 	musicDir := "/data/music"
 	var bgmPath string
 	useBGM := false
 
-	if musicFiles, err := os.ReadDir(musicDir); err == nil && len(musicFiles) > 0 {
-		// Filter for mp3 files only
-		var mp3Files []string
-		for _, file := range musicFiles {
-			if file.IsDir() {
-				continue
-			}
-			ext := strings.ToLower(filepath.Ext(file.Name()))
-			if ext == ".mp3" {
-				mp3Files = append(mp3Files, file.Name())
-			}
-		}
-
-		if len(mp3Files) > 0 {
-			// Randomly select one mp3 file
-			rand.Seed(time.Now().UnixNano())
-			selectedFile := mp3Files[rand.Intn(len(mp3Files))]
-			bgmPath = filepath.Join(musicDir, selectedFile)
+	if musicFile != "" {
+		// Use the specified music file
+		bgmPath = filepath.Join(musicDir, musicFile)
+		if _, err := os.Stat(bgmPath); err == nil {
 			useBGM = true
-			log.Printf("Selected background music: %s", selectedFile)
+			log.Printf("Using selected background music: %s", musicFile)
 		} else {
-			log.Printf("No mp3 files found in %s", musicDir)
+			log.Printf("Specified music file not found: %s, will use random", musicFile)
 		}
-	} else {
-		log.Printf("Music directory %s not accessible or empty", musicDir)
+	}
+
+	// If no specific file was selected or file not found, use random
+	if !useBGM {
+		if musicFiles, err := os.ReadDir(musicDir); err == nil && len(musicFiles) > 0 {
+			// Filter for mp3 files only
+			var mp3Files []string
+			for _, file := range musicFiles {
+				if file.IsDir() {
+					continue
+				}
+				ext := strings.ToLower(filepath.Ext(file.Name()))
+				if ext == ".mp3" {
+					mp3Files = append(mp3Files, file.Name())
+				}
+			}
+
+			if len(mp3Files) > 0 {
+				// Randomly select one mp3 file
+				rand.Seed(time.Now().UnixNano())
+				selectedFile := mp3Files[rand.Intn(len(mp3Files))]
+				bgmPath = filepath.Join(musicDir, selectedFile)
+				useBGM = true
+				log.Printf("Selected random background music: %s", selectedFile)
+			} else {
+				log.Printf("No mp3 files found in %s", musicDir)
+			}
+		} else {
+			log.Printf("Music directory %s not accessible or empty", musicDir)
+		}
 	}
 
 	var args []string
@@ -175,7 +210,8 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 			"-i", bgmPath,
 			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1,fade=t=in:st=0:d=0.5,fade=t=out:st=%.2f:d=0.5", scale, scale, frameDuration*float64(len(processedPaths))-0.5),
 			"-c:v", "libx264",
-			"-preset", "medium",
+			"-preset", "faster", // Use faster preset for speed
+			"-threads", "0", // Use all available CPU cores
 			"-crf", "23",
 			"-pix_fmt", "yuv420p",
 			"-c:a", "aac",
@@ -184,7 +220,7 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 			"-y",
 			outputPath,
 		}
-		log.Printf("Creating video with fade transitions and background music from %s", bgmPath)
+		log.Printf("Creating video with fade transitions and background music from %s (multi-threaded)", bgmPath)
 	} else {
 		// Without background music
 		args = []string{
@@ -193,13 +229,14 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 			"-i", concatFile,
 			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1,fade=t=in:st=0:d=0.5,fade=t=out:st=%.2f:d=0.5", scale, scale, frameDuration*float64(len(processedPaths))-0.5),
 			"-c:v", "libx264",
-			"-preset", "medium",
+			"-preset", "faster", // Use faster preset for speed
+			"-threads", "0", // Use all available CPU cores
 			"-crf", "23",
 			"-pix_fmt", "yuv420p",
 			"-y",
 			outputPath,
 		}
-		log.Printf("Creating video with fade transitions (no background music)")
+		log.Printf("Creating video with fade transitions (no background music, multi-threaded)")
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -719,6 +756,74 @@ func startHTTPServer(config *Config) error {
             font-size: 16px;
         }
         
+        /* YouTube download section */
+        .youtube-download {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 12px;
+            border: 1px solid #333;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+        .youtube-download h3 {
+            margin: 0 0 15px 0;
+            color: #ffffff;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .youtube-input-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .youtube-input-group input {
+            flex: 1;
+            padding: 12px 15px;
+            border: 1px solid #333;
+            border-radius: 8px;
+            background: #0a0a0a;
+            color: #ffffff;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+        .youtube-input-group input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        .youtube-input-group button {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        .youtube-input-group button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(102, 126, 234, 0.6);
+        }
+        .youtube-input-group button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        #downloadStatus {
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 8px;
+            display: none;
+            font-size: 14px;
+        }
+        #downloadStatus.success { background: #1a3a1a; color: #4ade80; border: 1px solid #2a4a2a; }
+        #downloadStatus.error { background: #3a1a1a; color: #f87171; border: 1px solid #4a2a2a; }
+        #downloadStatus.info { background: #1a2a3a; color: #60a5fa; border: 1px solid #2a3a4a; }
+
         /* Video badge in gallery */
         .video-badge {
             position: absolute;
@@ -752,6 +857,16 @@ func startHTTPServer(config *Config) error {
 <body>
     <a href="/" class="back-link">← Back to Phone List</a>
     <h1>📱 {{.PhoneName}}</h1>
+    
+    <div class="youtube-download">
+        <h3>🎵 Download Music from YouTube</h3>
+        <div class="youtube-input-group">
+            <input type="text" id="youtubeUrl" placeholder="Enter YouTube video URL..." />
+            <button onclick="downloadMusic()" id="downloadBtn">Download</button>
+        </div>
+        <div id="downloadStatus"></div>
+    </div>
+
     <div class="info-bar">
         <p class="count">Total: {{.TotalItems}} | Page {{.CurrentPage}} of {{.TotalPages}}</p>
         <button class="select-all-btn" onclick="selectAllOnPage()">✓ Select All on Page</button>
@@ -827,6 +942,14 @@ func startHTTPServer(config *Config) error {
                 <option value="high">High (1080p)</option>
                 <option value="medium" selected>Medium (720p)</option>
                 <option value="low">Low (480p)</option>
+            </select>
+            
+            <label>Background Music:</label>
+            <select id="musicFile">
+                <option value="">Random Music</option>
+                {{range .MusicFiles}}
+                <option value="{{.}}">{{.}}</option>
+                {{end}}
             </select>
             
             <div>
@@ -920,6 +1043,51 @@ func startHTTPServer(config *Config) error {
             updateSelectionBar();
         }
 
+        function downloadMusic() {
+            const urlInput = document.getElementById('youtubeUrl');
+            const url = urlInput.value.trim();
+            const statusDiv = document.getElementById('downloadStatus');
+            const downloadBtn = document.getElementById('downloadBtn');
+            
+            if (!url) {
+                statusDiv.className = 'error';
+                statusDiv.textContent = 'Please enter a YouTube URL';
+                statusDiv.style.display = 'block';
+                return;
+            }
+            
+            downloadBtn.disabled = true;
+            downloadBtn.textContent = 'Downloading...';
+            statusDiv.className = 'info';
+            statusDiv.textContent = 'Downloading music from YouTube...';
+            statusDiv.style.display = 'block';
+            
+            fetch('/download-music', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: url })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    statusDiv.className = 'success';
+                    statusDiv.textContent = '✓ ' + data.message;
+                    urlInput.value = '';
+                } else {
+                    statusDiv.className = 'error';
+                    statusDiv.textContent = '✗ ' + (data.error || 'Download failed');
+                }
+            })
+            .catch(error => {
+                statusDiv.className = 'error';
+                statusDiv.textContent = '✗ Error: ' + error.message;
+            })
+            .finally(() => {
+                downloadBtn.disabled = false;
+                downloadBtn.textContent = 'Download';
+            });
+        }
+
         function showVideoModal() {
             if (selectedPhotos.size === 0) {
                 alert('Please select at least one photo');
@@ -937,6 +1105,7 @@ func startHTTPServer(config *Config) error {
             const videoName = document.getElementById('videoName').value || 'slideshow';
             const frameDuration = parseFloat(document.getElementById('frameDuration').value);
             const videoQuality = document.getElementById('videoQuality').value;
+            const musicFile = document.getElementById('musicFile').value;
             
             if (selectedPhotos.size === 0) {
                 alert('No photos selected');
@@ -953,7 +1122,8 @@ func startHTTPServer(config *Config) error {
                 photos: Array.from(selectedPhotos),
                 videoName: videoName,
                 frameDuration: frameDuration,
-                quality: videoQuality
+                quality: videoQuality,
+                musicFile: musicFile
             };
 
             fetch('/create-video', {
@@ -1077,6 +1247,21 @@ func startHTTPServer(config *Config) error {
 			pageNumbers = append(pageNumbers, i)
 		}
 
+		// Get music files from /data/music
+		musicDir := "/data/music"
+		var musicFiles []string
+		if musicEntries, err := os.ReadDir(musicDir); err == nil {
+			for _, entry := range musicEntries {
+				if !entry.IsDir() {
+					ext := strings.ToLower(filepath.Ext(entry.Name()))
+					if ext == ".mp3" {
+						musicFiles = append(musicFiles, entry.Name())
+					}
+				}
+			}
+		}
+		sort.Strings(musicFiles)
+
 		t := template.Must(template.New("phone").Funcs(template.FuncMap{
 			"hasSuffix": strings.HasSuffix,
 		}).Parse(tmpl))
@@ -1089,6 +1274,7 @@ func startHTTPServer(config *Config) error {
 			PrevPage    int
 			NextPage    int
 			PageNumbers []int
+			MusicFiles  []string
 		}{
 			PhoneName:   phoneName,
 			Thumbs:      pagedThumbs,
@@ -1098,6 +1284,7 @@ func startHTTPServer(config *Config) error {
 			PrevPage:    page - 1,
 			NextPage:    page + 1,
 			PageNumbers: pageNumbers,
+			MusicFiles:  musicFiles,
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1181,9 +1368,31 @@ func startHTTPServer(config *Config) error {
 			if _, err := os.Stat(orig); err == nil {
 				log.Printf("Found original image: %s", orig)
 
-				// If it's a HEIC file, convert to JPEG on-the-fly for browser compatibility
+				// If it's a HEIC file, check if it's really HEIC or just a misnamed JPEG
 				if strings.ToLower(ext) == ".heic" {
-					log.Printf("Converting HEIC to JPEG for browser: %s", orig)
+					// Try to detect if it's actually a JPEG by checking file signature
+					isActuallyJPEG := false
+					if f, err := os.Open(orig); err == nil {
+						header := make([]byte, 3)
+						if n, _ := io.ReadFull(f, header); n == 3 {
+							// JPEG files start with FF D8 FF
+							if header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF {
+								isActuallyJPEG = true
+								log.Printf("File %s has .heic extension but is actually a JPEG", orig)
+							}
+						}
+						f.Close()
+					}
+
+					if isActuallyJPEG {
+						// Just serve it as JPEG
+						w.Header().Set("Content-Type", "image/jpeg")
+						http.ServeFile(w, r, orig)
+						return
+					}
+
+					// It's a real HEIC file - convert to JPEG for browser compatibility
+					log.Printf("Converting real HEIC to JPEG for browser: %s", orig)
 
 					// Create temporary JPEG file
 					tmpFile, err := os.CreateTemp("", "heic-web-*.jpg")
@@ -1230,6 +1439,104 @@ func startHTTPServer(config *Config) error {
 	}).Methods("GET")
 
 	// Create video from selected photos
+	router.HandleFunc("/download-music", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			URL string `json:"url"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Invalid request format",
+			})
+			return
+		}
+
+		if req.URL == "" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "URL is required",
+			})
+			return
+		}
+
+		// Determine the next bgm filename
+		musicDir := "/data/music"
+		files, err := os.ReadDir(musicDir)
+		if err != nil {
+			// If directory doesn't exist, create it
+			if os.IsNotExist(err) {
+				if err := os.MkdirAll(musicDir, 0755); err != nil {
+					log.Printf("Failed to create music directory: %v", err)
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success": false,
+						"error":   "Failed to create music directory",
+					})
+					return
+				}
+				files = []os.DirEntry{}
+			} else {
+				log.Printf("Failed to read music directory: %v", err)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success": false,
+					"error":   "Failed to access music directory",
+				})
+				return
+			}
+		}
+
+		// Count existing bgm*.mp3 files
+		bgmCount := 0
+		for _, file := range files {
+			if !file.IsDir() && strings.HasPrefix(file.Name(), "bgm") && strings.HasSuffix(file.Name(), ".mp3") {
+				bgmCount++
+			}
+		}
+
+		// Next file will be bgm(N+1).mp3
+		nextNum := bgmCount + 1
+		fileName := fmt.Sprintf("bgm%d", nextNum)
+
+		log.Printf("Downloading music from %s as %s.mp3", req.URL, fileName)
+
+		// Execute music_get_linux command
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "/usr/local/bin/music_get_linux",
+			"-output", musicDir,
+			"-name", fileName,
+			"-url", req.URL)
+
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("Failed to download music: %v\nOutput: %s", err, string(output))
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   fmt.Sprintf("Download failed: %v", err),
+			})
+			return
+		}
+
+		log.Printf("Music downloaded successfully: %s.mp3", fileName)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  true,
+			"message":  fmt.Sprintf("Music downloaded successfully as %s.mp3", fileName),
+			"filename": fileName + ".mp3",
+		})
+	}).Methods("POST")
+
 	router.HandleFunc("/create-video", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1242,6 +1549,7 @@ func startHTTPServer(config *Config) error {
 			VideoName     string   `json:"videoName"`
 			FrameDuration float64  `json:"frameDuration"`
 			Quality       string   `json:"quality"`
+			MusicFile     string   `json:"musicFile"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1274,7 +1582,7 @@ func startHTTPServer(config *Config) error {
 		}
 
 		// Create video synchronously so it's ready before we respond
-		if err := createVideoFromPhotos(phoneDir, req.Photos, videoName, req.FrameDuration, req.Quality); err != nil {
+		if err := createVideoFromPhotos(phoneDir, req.Photos, videoName, req.FrameDuration, req.Quality, req.MusicFile); err != nil {
 			log.Printf("Error creating video: %v", err)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
