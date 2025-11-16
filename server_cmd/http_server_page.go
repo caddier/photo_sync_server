@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -131,17 +132,74 @@ func createVideoFromPhotos(phoneDir string, thumbNames []string, videoName strin
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	args := []string{
-		"-f", "concat",
-		"-safe", "0",
-		"-i", concatFile,
-		"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1", scale, scale),
-		"-c:v", "libx264",
-		"-preset", "medium",
-		"-crf", "23",
-		"-pix_fmt", "yuv420p",
-		"-y",
-		outputPath,
+	// Select a random BGM file from /data/music
+	musicDir := "/data/music"
+	var bgmPath string
+	useBGM := false
+
+	if musicFiles, err := os.ReadDir(musicDir); err == nil && len(musicFiles) > 0 {
+		// Filter for mp3 files only
+		var mp3Files []string
+		for _, file := range musicFiles {
+			if file.IsDir() {
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(file.Name()))
+			if ext == ".mp3" {
+				mp3Files = append(mp3Files, file.Name())
+			}
+		}
+
+		if len(mp3Files) > 0 {
+			// Randomly select one mp3 file
+			rand.Seed(time.Now().UnixNano())
+			selectedFile := mp3Files[rand.Intn(len(mp3Files))]
+			bgmPath = filepath.Join(musicDir, selectedFile)
+			useBGM = true
+			log.Printf("Selected background music: %s", selectedFile)
+		} else {
+			log.Printf("No mp3 files found in %s", musicDir)
+		}
+	} else {
+		log.Printf("Music directory %s not accessible or empty", musicDir)
+	}
+
+	var args []string
+	if useBGM {
+		// With background music
+		args = []string{
+			"-f", "concat",
+			"-safe", "0",
+			"-i", concatFile,
+			"-stream_loop", "-1", // Loop the audio
+			"-i", bgmPath,
+			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1", scale, scale),
+			"-c:v", "libx264",
+			"-preset", "medium",
+			"-crf", "23",
+			"-pix_fmt", "yuv420p",
+			"-c:a", "aac",
+			"-b:a", "128k",
+			"-shortest", // Stop when video ends
+			"-y",
+			outputPath,
+		}
+		log.Printf("Creating video with background music from %s", bgmPath)
+	} else {
+		// Without background music (original code)
+		args = []string{
+			"-f", "concat",
+			"-safe", "0",
+			"-i", concatFile,
+			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2,setsar=1", scale, scale),
+			"-c:v", "libx264",
+			"-preset", "medium",
+			"-crf", "23",
+			"-pix_fmt", "yuv420p",
+			"-y",
+			outputPath,
+		}
+		log.Printf("Creating video without background music (no music files available)")
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
