@@ -979,7 +979,7 @@ func startHTTPServer(config *Config) error {
 		<div class="gallery-item video-item" data-filename="{{.}}" data-is-video="true">
             <span class="video-badge">🎬 VIDEO</span>
 			<a href="#" onclick="playVideo('{{$.PhoneName}}', '{{.}}'); return false;">
-				<img src="/thumb/{{$.PhoneName}}/tbn-{{.}}" alt="{{.}}" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22200%22 height=%22200%22%3E%3Crect fill=%22%23333%22 width=%22200%22 height=%22200%22/%3E%3Ctext fill=%22%23fff%22 x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 dy=%22.3em%22%3EVIDEO%3C/text%3E%3C/svg%3E'" />
+				<img src="/thumb/{{$.PhoneName}}/{{getVideoThumb .}}" alt="{{.}}" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22200%22 height=%22200%22%3E%3Crect fill=%22%23333%22 width=%22200%22 height=%22200%22/%3E%3Ctext fill=%22%23fff%22 x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 dy=%22.3em%22%3EVIDEO%3C/text%3E%3C/svg%3E'" />
 			</a>
             <div class="filename">{{.}}</div>
         </div>
@@ -1427,9 +1427,26 @@ func startHTTPServer(config *Config) error {
 			return false
 		}
 
+		// Helper function to get the correct thumbnail path for a video
+		getVideoThumbFunc := func(videoName string) string {
+			// If it's a direct video file (e.g., video.mp4), construct thumbnail path
+			ext := strings.ToLower(filepath.Ext(videoName))
+			videoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+			for _, vext := range videoExts {
+				if ext == vext {
+					// Remove video extension, add .jpg
+					base := strings.TrimSuffix(videoName, ext)
+					return "tbn-" + base + ".jpg"
+				}
+			}
+			// Not a video file, return as-is
+			return videoName
+		}
+
 		t := template.Must(template.New("phone").Funcs(template.FuncMap{
-			"hasSuffix": strings.HasSuffix,
-			"isVideo":   isVideoFunc,
+			"hasSuffix":     strings.HasSuffix,
+			"isVideo":       isVideoFunc,
+			"getVideoThumb": getVideoThumbFunc,
 		}).Parse(tmpl))
 		data := struct {
 			PhoneName   string
