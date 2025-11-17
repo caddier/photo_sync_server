@@ -467,7 +467,15 @@ func startHTTPServer(config *Config) error {
 			for _, e := range phoneEntries {
 				if !e.IsDir() {
 					ext := strings.ToLower(filepath.Ext(e.Name()))
-					if ext == ".mp4" {
+					videoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+					isVideo := false
+					for _, vext := range videoExts {
+						if ext == vext {
+							isVideo = true
+							break
+						}
+					}
+					if isVideo {
 						thumbFiles = append(thumbFiles, e.Name())
 					}
 				}
@@ -643,6 +651,15 @@ func startHTTPServer(config *Config) error {
         .create-video-btn:hover { 
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(76, 175, 80, 0.6);
+        }
+        .delete-btn {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a52 100%);
+            color: white;
+            box-shadow: 0 2px 8px rgba(255, 107, 107, 0.4);
+        }
+        .delete-btn:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(255, 107, 107, 0.6);
         }
         .clear-selection-btn {
             background: linear-gradient(135deg, #f44336 0%, #da190b 100%);
@@ -958,7 +975,7 @@ func startHTTPServer(config *Config) error {
     {{if .Thumbs}}
     <div class="gallery">
         {{range .Thumbs}}
-        {{if hasSuffix . ".mp4"}}
+        {{if isVideo .}}
 		<div class="gallery-item video-item" data-filename="{{.}}" data-is-video="true">
             <span class="video-badge">🎬 VIDEO</span>
 			<a href="#" onclick="playVideo('{{$.PhoneName}}', '{{.}}'); return false;">
@@ -984,6 +1001,7 @@ func startHTTPServer(config *Config) error {
     <div class="selection-bar" id="selectionBar">
         <span id="selectionCount">0 selected</span>
         <button class="create-video-btn" onclick="showVideoModal()">🎬 Create Video</button>
+        <button class="delete-btn" onclick="deleteSelected()">🗑️ Delete</button>
         <button class="clear-selection-btn" onclick="clearSelection()">✕ Clear</button>
     </div>
 
@@ -1216,9 +1234,23 @@ func startHTTPServer(config *Config) error {
         let shouldReloadAfterVideo = false;
 
         function playVideo(phone, filename, reloadAfterClose) {
+            // If filename is a thumbnail (starts with tbn-), resolve to original video file
+            let videoFilename = filename;
+            if (filename.toLowerCase().startsWith('tbn-')) {
+                // Remove tbn- prefix and .jpg extension
+                const base = filename.substring(4).replace(/\.(jpg|jpeg|png)$/i, '');
+                // Try to find the actual video file with common video extensions
+                const videoExts = ['.mp4', '.mov', '.m4v', '.avi', '.mkv'];
+                // For now, we'll construct the URL and let the server handle it
+                // The server should be able to serve the original video
+                videoFilename = base;
+                // We need to try different extensions - let's use the first one that works
+                // But since we can't try multiple, we'll rely on the /orig handler
+            }
+            
             const videoSource = document.getElementById('videoSource');
             const videoPlayer = document.getElementById('videoPlayer');
-            const videoUrl = '/orig/' + phone + '/' + filename;
+            const videoUrl = '/orig/' + phone + '/' + videoFilename;
             
             shouldReloadAfterVideo = reloadAfterClose || false;
             
@@ -1266,6 +1298,52 @@ func startHTTPServer(config *Config) error {
 
         function closePhotoViewer() {
             document.getElementById('photoViewerModal').style.display = 'none';
+        }
+
+        function deleteSelected() {
+            if (selectedPhotos.size === 0) {
+                alert('Please select at least one photo to delete');
+                return;
+            }
+
+            const count = selectedPhotos.size;
+            const confirmMsg = 'Are you sure you want to delete ' + count + ' photo(s)?\n\nThis will permanently delete both the original file(s) and thumbnail(s).';
+            
+            if (!confirm(confirmMsg)) {
+                return;
+            }
+
+            const photosToDelete = Array.from(selectedPhotos);
+            
+            fetch('/delete-photos', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    phoneName: phoneName,
+                    photos: photosToDelete
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Successfully deleted ' + data.deleted + ' photo(s)');
+                    // Remove deleted items from the page
+                    photosToDelete.forEach(filename => {
+                        const item = document.querySelector('.gallery-item[data-filename="' + filename + '"]');
+                        if (item) {
+                            item.remove();
+                        }
+                    });
+                    clearSelection();
+                    // Reload to update pagination
+                    window.location.reload();
+                } else {
+                    alert('Error deleting photos: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                alert('Error deleting photos: ' + err.message);
+            });
         }
 
         // Close modal when clicking outside
@@ -1321,8 +1399,37 @@ func startHTTPServer(config *Config) error {
 		}
 		sort.Strings(musicFiles)
 
+		// Helper function to check if a thumbnail corresponds to a video file
+		isVideoFunc := func(thumbName string) bool {
+			// If the filename itself is a video file (direct video, not thumbnail)
+			ext := strings.ToLower(filepath.Ext(thumbName))
+			videoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+			for _, vext := range videoExts {
+				if ext == vext {
+					return true
+				}
+			}
+
+			// If it's a thumbnail, check if the original file is a video
+			thumbExt := strings.ToLower(filepath.Ext(thumbName))
+			base := strings.TrimSuffix(thumbName, thumbExt)
+			if strings.HasPrefix(strings.ToLower(base), "tbn-") {
+				base = base[4:]
+			}
+
+			// Check if original file is a video
+			for _, vext := range videoExts {
+				origPath := filepath.Join(phoneDir, base+vext)
+				if _, err := os.Stat(origPath); err == nil {
+					return true
+				}
+			}
+			return false
+		}
+
 		t := template.Must(template.New("phone").Funcs(template.FuncMap{
 			"hasSuffix": strings.HasSuffix,
+			"isVideo":   isVideoFunc,
 		}).Parse(tmpl))
 		data := struct {
 			PhoneName   string
@@ -1397,18 +1504,36 @@ func startHTTPServer(config *Config) error {
 
 		phoneDir := filepath.Join(baseDir, phoneName)
 
-		// If thumbName is a direct video file (e.g., .mp4), serve it directly
-		if strings.ToLower(filepath.Ext(thumbName)) == ".mp4" {
+		// If thumbName is a direct video file, serve it directly
+		thumbExt := strings.ToLower(filepath.Ext(thumbName))
+		allVideoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+		isDirectVideo := false
+		for _, vext := range allVideoExts {
+			if thumbExt == vext {
+				isDirectVideo = true
+				break
+			}
+		}
+
+		if isDirectVideo {
 			videoPath := filepath.Join(phoneDir, thumbName)
 			if _, err := os.Stat(videoPath); err == nil {
-				w.Header().Set("Content-Type", "video/mp4")
+				// Set appropriate content type based on extension
+				contentType := "video/mp4"
+				if thumbExt == ".mov" {
+					contentType = "video/quicktime"
+				} else if thumbExt == ".avi" {
+					contentType = "video/x-msvideo"
+				} else if thumbExt == ".mkv" {
+					contentType = "video/x-matroska"
+				}
+				w.Header().Set("Content-Type", contentType)
 				http.ServeFile(w, r, videoPath)
 				return
 			}
 		}
 
 		// Derive base name from thumbnail: remove extension and optional tbn- prefix
-		thumbExt := strings.ToLower(filepath.Ext(thumbName))
 		base := strings.TrimSuffix(thumbName, thumbExt)
 		if strings.HasPrefix(strings.ToLower(base), "tbn-") {
 			base = base[4:]
@@ -1658,6 +1783,102 @@ func startHTTPServer(config *Config) error {
 			"filename": videoName + ".mp4",
 			"message":  "Video created successfully",
 		})
+	}).Methods("POST")
+
+	// Delete photos handler
+	router.HandleFunc("/delete-photos", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			PhoneName string   `json:"phoneName"`
+			Photos    []string `json:"photos"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Invalid request: " + err.Error(),
+			})
+			return
+		}
+
+		if len(req.Photos) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "No photos selected",
+			})
+			return
+		}
+
+		baseDir := config.ReceiveDir
+		if baseDir == "" {
+			baseDir = "received"
+		}
+
+		phoneDir := filepath.Join(baseDir, req.PhoneName)
+		thumbDir := filepath.Join(phoneDir, "thumbnails")
+
+		deletedCount := 0
+		var errors []string
+
+		for _, thumbName := range req.Photos {
+			// Extract base name from thumbnail
+			thumbExt := strings.ToLower(filepath.Ext(thumbName))
+			base := strings.TrimSuffix(thumbName, thumbExt)
+			if strings.HasPrefix(strings.ToLower(base), "tbn-") {
+				base = base[4:]
+			}
+
+			// Try to delete original file with various extensions
+			imageExts := []string{".jpg", ".jpeg", ".png", ".heic"}
+			videoExts := []string{".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+			allExts := append(imageExts, videoExts...)
+
+			deletedOriginal := false
+			for _, ext := range allExts {
+				origPath := filepath.Join(phoneDir, base+ext)
+				if err := os.Remove(origPath); err == nil {
+					log.Printf("Deleted original file: %s", origPath)
+					deletedOriginal = true
+					break
+				}
+			}
+
+			if !deletedOriginal {
+				errors = append(errors, fmt.Sprintf("Original file not found for: %s", thumbName))
+				continue
+			}
+
+			// Delete thumbnail
+			thumbPath := filepath.Join(thumbDir, thumbName)
+			if err := os.Remove(thumbPath); err != nil {
+				log.Printf("Warning: Failed to delete thumbnail %s: %v", thumbPath, err)
+				// Don't add to errors - original was deleted which is most important
+			} else {
+				log.Printf("Deleted thumbnail: %s", thumbPath)
+			}
+
+			deletedCount++
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if len(errors) > 0 && deletedCount == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "Failed to delete photos: " + strings.Join(errors, "; "),
+			})
+		} else {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"deleted": deletedCount,
+				"errors":  errors,
+			})
+		}
 	}).Methods("POST")
 
 	// File folder viewer - list files in preset folders (music, data, etc.)
